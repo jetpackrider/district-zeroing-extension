@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os';
 import { extname, join, normalize } from 'node:path';
 import { hasRealNY, ROOT } from './harness';
 
-const STORE = join(ROOT, '.output/chrome-mv3');
+// STORE_BUILD=opera-mv3 checks the Opera package instead.
+const STORE = join(ROOT, '.output', process.env.STORE_BUILD ?? 'chrome-mv3');
 const DATA_HOST = 'jetpackrider.github.io';
 test.skip(!process.env.HOSTED, 'store-build check only on demand (it downloads from the data host)');
 test.skip(!existsSync(join(STORE, 'manifest.json')) || !hasRealNY(), 'run `npm run build` (and fixture:gen with data/NY present) first');
