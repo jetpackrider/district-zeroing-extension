@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zero Deviation</title>
+    <meta name="manifest.default_title" content="Zero Deviation" />
+    <style>
+      html, body { margin: 0; height: 100%; }
+      body { font: 14px/1.4 system-ui, sans-serif; background: #fff; color: #111; }
+      #root { min-height: 100%; }
+      #zd-drop { display: none; position: fixed; inset: 8px; border: 3px dashed #1b65d6; border-radius: 12px; background: rgba(27,101,214,.08); align-items: center; justify-content: center; font-weight: 600; z-index: 99; pointer-events: none; }
+      body.zd-dragging #zd-drop { display: flex; }
+      #zd-diagnostics { margin: 12px 8px 8px; font: 12px/1.35 system-ui, sans-serif; color: #555; }
+      #zd-diagnostics summary { cursor: pointer; user-select: none; }
+      #zd-diagnostics[data-state="warn"] summary { color: #b45309; font-weight: 600; }
+      #zd-diagnostics pre { white-space: pre-wrap; word-break: break-word; max-height: 50vh; overflow: auto; background: rgba(127,127,127,.08); border-radius: 6px; padding: 8px; margin: 6px 0; font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      #zd-diagnostics button { font: inherit; padding: 2px 10px; }
+      @media (prefers-color-scheme: dark) { body { background: #121212; color: #eee; } #zd-diagnostics { color: #aaa; } }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="zd-drop">Drop DRA's block-assignment CSV</div>
+    <details id="zd-diagnostics" data-testid="diagnostics">
+      <summary id="zd-diagnostics-summary">Diagnostics</summary>
+      <pre id="zd-diagnostics-text" data-testid="diagnostics-text"></pre>
+      <button type="button" id="zd-diagnostics-copy" data-testid="diagnostics-copy">Copy</button>
+      <div>Built in this browser from what the extension read; nothing is sent anywhere.</div>
+    </details>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

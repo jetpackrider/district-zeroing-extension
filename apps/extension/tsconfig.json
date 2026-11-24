@@ -1,0 +1,11 @@
+{
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "skipLibCheck": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable", "WebWorker"],
+    "types": ["node", "chrome"]
+  },
+  "include": [".wxt/wxt.d.ts", "src", "tests", "fixture/*.ts", "wxt.config.ts", "playwright.config.ts"]
+}

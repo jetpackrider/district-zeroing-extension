@@ -1,0 +1,39 @@
+{
+  "name": "@zd/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DRA zero-deviation helper: browser extension shell",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "build:opera": "wxt build -b opera",
+    "build:test": "ZD_TEST=1 wxt build",
+    "build:test:opera": "ZD_TEST=1 wxt build -b opera",
+    "fixture:gen": "node fixture/generate.mjs && node fixture/gen-real.mjs",
+    "serve": "node scripts/serve.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test",
+    "test": "npm run typecheck && npm run build && npm run build:local && npm run test:unit && npm run build:test && npm run fixture:gen && npm run test:e2e",
+    "build:local": "ZD_LOCAL=1 wxt build"
+  },
+  "dependencies": {
+    "@zd/bundle": "file:../../packages/bundle",
+    "@zd/contracts": "file:../../packages/contracts",
+    "@zd/engine": "file:../../packages/engine",
+    "@zd/panel-ui": "file:../../packages/panel-ui",
+    "@zd/planner": "file:../../packages/planner",
+    "maplibre-gl": "5.24.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@types/chrome": "^0.1.43",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.12",
+    "wxt": "0.21.5"
+  }
+}

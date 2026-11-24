@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<link rel="icon" href="data:," />
+<title>Fake DRA (test fixture)</title>
+<link rel="stylesheet" href="/vendor/maplibre-gl.css" />
+<style>
+  html, body { margin: 0; height: 100%; font: 13px system-ui, sans-serif; }
+  #map { position: absolute; inset: 0 0 0 260px; }
+  #side { position: absolute; inset: 0 auto 0 0; width: 250px; padding: 8px; overflow: auto; box-sizing: border-box; }
+  #side table { border-collapse: collapse; width: 100%; } #side td { padding: 2px 4px; border-bottom: 1px solid #eee; }
+</style>
+<script>
+  // Mirrors DRA's page: mapbox-gl.js is a plain <script>, then the app bundle.
+  const qs = new URLSearchParams(location.search);
+  document.documentElement.dataset.zdGraceMs = qs.get('grace') || '1500';
+  if (qs.get('force')) document.documentElement.dataset.zdForceHookFail = qs.get('force');
+  if (qs.get('paintwait')) document.documentElement.dataset.zdPaintWaitScale = qs.get('paintwait');
+</script>
+<script src="/vendor/maplibre-gl.js"></script>
+<script src="/mapbox-shim.js"></script>
+</head>
+<body>
+<div id="side"><b>Fake DRA</b> (fixture)<table id="districts"></table><div id="status"></div></div>
+<div id="map"></div>
+<script src="/fake-dra.js"></script>
+</body>
+</html>

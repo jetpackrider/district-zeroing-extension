@@ -1,0 +1,10 @@
+{
+  "name": "district-zeroing-extension",
+  "private": true,
+  "description": "Root scripts only. Each package installs on its own (no npm workspace); see SPEC.md.",
+  "scripts": {
+    "install:all": "for d in pipeline packages/bundle packages/engine packages/planner packages/panel-ui apps/extension; do npm install --prefix \"$d\" || exit 1; done",
+    "test:all": "npm test --prefix packages/bundle && npm test --prefix packages/engine && npm test --prefix packages/planner && npm run test:engine --prefix packages/planner && npm test --prefix packages/panel-ui && npm run build --prefix packages/panel-ui && npm test --prefix apps/extension",
+    "test:ny": "cd packages/planner && npx tsx scripts/ny-sweep.ts && npx tsx scripts/ny-groups.ts && npx tsx scripts/ny-fallback.ts && cd ../engine && npx tsx scripts/history-check.ts"
+  }
+}

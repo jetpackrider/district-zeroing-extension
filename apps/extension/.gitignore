@@ -1,0 +1,10 @@
+node_modules/
+.output/
+.output-test/
+.wxt/
+test-results/
+playwright-report/
+fixture/data/
+fixture/www/plan.json
+local/
+fixture/www/plan-*.json

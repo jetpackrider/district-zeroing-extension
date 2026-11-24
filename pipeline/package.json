@@ -1,0 +1,8 @@
+{
+  "name": "district-zeroing-pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "mapshaper": "0.8.8"
+  }
+}

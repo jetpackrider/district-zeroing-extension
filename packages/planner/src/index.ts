@@ -1,0 +1,10 @@
+export { planGroup, kindWeights, flowParams, PLAN_KINDS, MAX_REPLANS, MAX_ROUNDS, MAX_REPAIR_REPLANS, SLACK_COST, PROBE_WINDOW, DEFER_MAX, WINDOW_MAX, type PlanKind, type PlanFailure, type PlannerResult, type PlanOptions } from './plan';
+export { repairResiduals, REPAIR_MAX_DEPTH, REPAIR_BEAM, REPAIR_SWAP_ROOM, REPAIR_CALL_BUDGET, type RepairInput, type RepairResult, type RepairStuck, type RepairMemo } from './repair';
+export { checkGroupFeasibility, analyzeGroup, populationExcess, extraSlot, type GroupAnalysis, type GroupComponent, type FeasibilityRequest } from './feasibility';
+export { buildInteractionGraph, collectCurves, interactionFromCurves, internalPairs, cleanTiers, CurveCache, type CurveMap, type InteractionRequest } from './interaction';
+export { minCostFlow, type FlowArc, type FlowResult } from './mcf';
+export { planFlow, absorbTiers, FLOW_PARAMS, type FlowModelInput, type FlowPlan, type BorderFlow, type FlowCostParams } from './flowModel';
+export { verifyPlan, type PlanCheckInput, type PlanCheckResult, type PlanIssue, type PlanIssueKind } from './verify';
+export { planMetrics } from './stats';
+export { districtPopulations, districtAdjacency } from './districts';
+export { DEFAULT_WEIGHTS, resolveWeights } from './weights';

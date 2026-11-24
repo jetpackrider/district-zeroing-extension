@@ -1,0 +1,10 @@
+{
+  "name": "@zd/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./verify": "./src/verify.ts" },
+  "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit", "bench": "tsx scripts/benchmark.ts", "cli": "tsx scripts/cli.ts", "sweep": "tsx scripts/sweep.ts" },
+  "dependencies": { "@zd/contracts": "file:../contracts" },
+  "devDependencies": { "@types/node": "^24.0.0", "tsx": "^4.20.0", "typescript": "^5.9.0", "vitest": "^4.0.0" }
+}

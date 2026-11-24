@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.output/
+.wxt/
+*.tsbuildinfo
+__pycache__/
+.venv/
+.DS_Store
+# pipeline downloads and built bundles (large, rebuildable)
+pipeline/cache/
+data/
+# run logs (contain local paths)
+*.log
