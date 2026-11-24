@@ -88,18 +88,22 @@ https://github.com/jetpackrider/district-zeroing-extension/blob/main/PRIVACY.md
 
 ## 5. Test instructions for the reviewer
 
+Leave the username and password empty. The instructions field holds 500 characters:
+
 ```text
-1. Sign in at https://davesredistricting.org (a free account) and open or create any congressional map on 2020 shapes for any state.
-2. Reload the tab once after installing, then click the extension's toolbar button to open the side panel.
-3. The panel lists the districts with their deviations. Choose "One district" or "Whole map" and click the button to find options.
-4. Click "Walkthrough" on an option. The blocks to paint are highlighted and numbered on the map.
-The first use on a state downloads that state's public census data file from jetpackrider.github.io.
+The extension has no login. It works on https://davesredistricting.org, which needs a free account.
+1. Sign in there and open or create any congressional map on 2020 shapes.
+2. Reload the tab once, then click the extension's toolbar button to open the side panel.
+3. Choose "One district" or "Whole map" and click the button to find options.
+4. Click "Walkthrough" on an option: the blocks to paint are highlighted on the map.
+First use of a state downloads its data from jetpackrider.github.io.
 ```
 
 ## 6. Account
 
+- Publisher display name: `jetpackrider` (it defaults to the account's email address and is shown on the listing).
 - Trader declaration: **non-trader**.
-- The account needs a verified contact email before anything can be published (Account tab).
+- A contact email must be added and verified on the Settings page before anything can be published. It is displayed publicly with the item.
 
 ## After it is approved
 
