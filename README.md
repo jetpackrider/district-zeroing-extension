@@ -44,9 +44,9 @@ Getting the last few people out of a district means hunting along its border for
 
 | Mode | What you get |
 |---|---|
-| **One district** | Ranked ways to bring it to zero by trading with its neighbors. You can choose which neighbor gives or takes. |
+| **One&nbsp;district** | Ranked ways to bring it to zero by trading with its neighbors. You can choose which neighbor gives or takes. |
 | **Group** | A plan that zeroes the districts you tick, among themselves or with outside neighbors absorbing the difference. |
-| **Whole map** | A plan for every unlocked district at once, border by border. |
+| **Whole&nbsp;map** | A plan for every unlocked district at once, border by border. |
 
 Pick an option and the walkthrough takes over. Each step is one precinct: shatter it, paint the numbered blocks, commit. The panel watches the map and ticks blocks off as they land, notices edits that aren't part of the plan, and can re-plan from wherever you are. At the end it re-reads DRA's own numbers and confirms every district.
 
@@ -66,24 +66,25 @@ If you'd rather not click each block, an optional setting adds a button that pai
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TB
   subgraph tab["Your DRA tab"]
-    dra["DRA's page"] <--> hook["Page hook<br/>reads the plan, draws highlights"]
-    hook <-->|private channel| relay["Relay"]
+    direction LR
+    dra["DRA's page"] <--> hook["Page hook<br/>reads the plan,<br/>draws highlights"] <-->|private channel| relay["Relay"]
   end
   subgraph ext["Side panel"]
-    ctl["Controller"] <--> ui["Panel"]
-    ctl <--> worker["Engine worker<br/>border solver + planner"]
+    direction LR
+    ui["Panel"] <--> ctl["Controller"] <--> worker["Engine worker<br/>border solver + planner"]
   end
-  relay <--> ctl
-  data[("State bundle<br/>blocks, populations,<br/>adjacency, precincts")] --> ctl
+  data[("State bundle<br/>blocks, populations,<br/>adjacency, precincts")]
+  tab <-->|"plan in, highlights out"| ext
+  data --> ext
 ```
 
 - **The page hook** reads the open plan from the page, including edits you haven't committed, and draws the highlight layers on DRA's map. It makes no network requests and never calls DRA's servers.
 - **The state bundle** is a compact file per state built from Census TIGER block shapes and DRA's published block data: every block's population, county, precinct, town, whether it is water, and which blocks share a border and for how many meters.
 - **The engine** solves one border at a time: which contiguous set of blocks moves exactly N people at the lowest cost. **The planner** sits above it for several districts: it routes people across borders with a min-cost flow, asks the engine to realize each border, and repairs what doesn't fit with two-way trades and detours through other districts. Every plan is checked by a separate verifier before it is shown.
 
-Everything runs in a Web Worker in your browser. On New York (288,819 blocks, 26 districts) a one-district solve takes a fraction of a second and a whole-map plan one to a few seconds.
+All of the solving runs in a Web Worker in your browser. On New York (288,819 blocks, 26 districts) a one-district solve takes a fraction of a second and a whole-map plan one to a few seconds.
 
 ## Build it
 
