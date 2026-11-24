@@ -75,7 +75,7 @@ flowchart TB
     direction LR
     ui["Panel"] <--> ctl["Controller"] <--> worker["Engine worker<br/>border solver + planner"]
   end
-  data[("State bundle<br/>blocks, populations,<br/>adjacency, precincts")]
+  data[("State bundle<br/>blocks, adjacency, precincts")]
   tab <-->|"plan in, highlights out"| ext
   data --> ext
 ```
