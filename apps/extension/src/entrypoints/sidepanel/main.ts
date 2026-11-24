@@ -15,7 +15,9 @@ function resolveDataUrl(url: string): string {
 async function main() {
   const settings = await chrome.storage.local.get(['dataBaseUrl', 'miniMapTiles', 'autoPaint', 'districtLocks']);
   const dataBaseUrl = resolveDataUrl((settings.dataBaseUrl as string) || __ZD_DATA_URL__);
-  const tiles = typeof settings.miniMapTiles === 'string' ? settings.miniMapTiles : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  // The fallback mini-map draws the blocks on a plain background. A basemap is opt-in (the
+  // `miniMapTiles` setting), so the extension makes no third-party requests on its own.
+  const tiles = typeof settings.miniMapTiles === 'string' ? settings.miniMapTiles : '';
 
   const controller = new ExtensionController({
     host,

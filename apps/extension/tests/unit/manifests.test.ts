@@ -24,7 +24,7 @@ describe('shipped manifests (run `npm run build && npm run build:opera` first)',
     expect(main.run_at).toBe('document_start');
     expect(m.side_panel.default_path).toBe('sidepanel.html');
     expect(m.web_accessible_resources).toBeUndefined();
-    expect(m.name).toBe('DRA Zero Deviation');
+    expect(m.name).toBe('Zero Deviation');
   });
   it.skipIf(!existsSync(out('.output/opera-mv3')))('opera: sidebar_action plus side_panel, same permissions', () => {
     const m = read('.output/opera-mv3');

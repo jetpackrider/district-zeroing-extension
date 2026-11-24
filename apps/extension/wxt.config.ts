@@ -19,7 +19,7 @@ const DRA_MATCH = 'https://davesredistricting.org/*';
 const TEST_MATCHES = ['http://localhost/*', 'http://127.0.0.1/*'];
 /** `extension:` = resolve against the extension's own files (chrome.runtime.getURL). */
 const EMBEDDED_DATA_URL = 'extension:data/';
-const DATA_URL = LOCAL ? EMBEDDED_DATA_URL : (process.env.ZD_DATA_URL ?? 'https://zd-data.invalid/v1');
+const DATA_URL = LOCAL ? EMBEDDED_DATA_URL : (process.env.ZD_DATA_URL ?? 'https://jetpackrider.github.io/zero-deviation-data/v1');
 const DATA_ROOT = resolve('../../data');
 
 function localStates(): string[] {
@@ -53,13 +53,14 @@ export default defineConfig({
   outDir: TEST ? '.output-test' : LOCAL ? 'local' : '.output',
   manifestVersion: 3,
   manifest: ({ browser }) => ({
-    name: TEST ? 'DRA Zero Deviation (TEST BUILD)' : LOCAL ? 'DRA Zero Deviation (local build)' : 'DRA Zero Deviation',
-    description: 'Finds the census blocks that bring your Dave\'s Redistricting districts to zero deviation, and walks you through painting them by hand.',
+    name: TEST ? 'Zero Deviation (TEST BUILD)' : LOCAL ? 'Zero Deviation (local build)' : 'Zero Deviation',
+    // At most 132 characters: the Chrome Web Store shows this as the listing's summary.
+    description: 'Finds the census blocks that bring a district, group, or whole map to zero deviation in Dave\'s Redistricting, and walks you there.',
     // SPEC "Permissions and store policy": exactly these. sidePanel is added by WXT for the sidepanel entrypoint.
     // The local build needs nothing more: extension pages can fetch the extension's own files.
     permissions: ['sidePanel', 'storage', 'unlimitedStorage'],
     host_permissions: TEST ? [DRA_MATCH, ...TEST_MATCHES] : [DRA_MATCH],
-    action: { default_title: 'DRA Zero Deviation' },
+    action: { default_title: 'Zero Deviation' },
     ...(browser === 'opera'
       ? {
           // Opera's own sidebar (opr.sidebarAction), the second link in the panel chain.

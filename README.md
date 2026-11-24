@@ -88,28 +88,37 @@ All of the solving runs in a Web Worker in your browser. On New York (288,819 bl
 
 ## Build it
 
-It is not in an extension store yet, so for now you build it yourself. You need Node, [uv](https://docs.astral.sh/uv/) for the data pipeline, and a Chromium browser with a side panel (Chrome 114 or later).
+It is not listed in an extension store yet, so for now you build it yourself. You need Node and a Chromium browser with a side panel (Chrome 114 or later).
 
 ```bash
 git clone https://github.com/jetpackrider/district-zeroing-extension.git
 cd district-zeroing-extension
 npm run install:all
-
-# Data for the state you draw. New York downloads about 340 MB and builds a 31 MB bundle.
-(cd pipeline && uv run build.py build NY)
-
-# The panel UI, then an unpacked extension with that state's data inside it.
 npm run build --prefix packages/panel-ui
-ZD_LOCAL_STATES=NY npm run build:local --prefix apps/extension
+npm run build --prefix apps/extension
 ```
 
 Then:
 
-1. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick `apps/extension/local/chrome-mv3`.
+1. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick `apps/extension/.output/chrome-mv3`.
 2. Open one of your maps on davesredistricting.org and **reload the tab** once, so the page hook attaches.
 3. Click the extension's toolbar button to open the panel.
 
-For several states, list them: `ZD_LOCAL_STATES=NY,NJ,PA`. The first time you try the paint button, do it on a copy of a map.
+The first time you work on a state, the extension downloads that state's data from this project's [data repo](https://github.com/jetpackrider/zero-deviation-data) and keeps it: up to 12 MB up front, then block shapes for the counties you work in. The first time you try the paint button, do it on a copy of a map.
+
+<details>
+<summary>Building the data yourself, or an extension with the data inside it</summary>
+
+The data files come from the pipeline, which needs [uv](https://docs.astral.sh/uv/). New York downloads about 340 MB of source files and builds a 31 MB bundle:
+
+```bash
+(cd pipeline && uv run build.py build NY)
+ZD_LOCAL_STATES=NY npm run build:local --prefix apps/extension
+```
+
+That writes a self-contained extension to `apps/extension/local/chrome-mv3` with New York's data inside it, which makes no network requests at all. For several states, list them: `ZD_LOCAL_STATES=NY,NJ,PA`.
+
+</details>
 
 ## Status
 
@@ -122,11 +131,11 @@ This is a working pre-release, and it helps to know exactly how far it has been 
 - **Known gaps:** a 203-district map (Pennsylvania's House) is not solved as a whole map; solve it in groups. Whole-map plans for California and Texas took 16 to 24 seconds when last measured.
 - **It leans on DRA's page internals,** which are not a supported interface. When DRA changes them, a startup self-check says which part broke, and you can still drop in DRA's block-assignment CSV export and work from that.
 
-Zero Deviation is not affiliated with or endorsed by Dave's Redistricting. What needs settling before a store release, including checking with the DRA team, is in [docs/PUBLISHING.md](docs/PUBLISHING.md).
+Zero Deviation is not affiliated with or endorsed by Dave's Redistricting. Where publishing stands, including checking with the DRA team, is in [docs/PUBLISHING.md](docs/PUBLISHING.md).
 
 ## Privacy
 
-Your plan never leaves your browser. The extension has no analytics, no accounts and no server of its own. The build described above makes no network requests at all, because the data is inside it. A store build would download the public per-state data file for the state you open, and nothing about your map.
+Your plan never leaves your browser. The extension has no analytics, no accounts and no server of its own. The only request it makes is to download the public data file for the state you open, from GitHub Pages, which says nothing about your map. The full policy is in [PRIVACY.md](PRIVACY.md).
 
 ## Around the repository
 

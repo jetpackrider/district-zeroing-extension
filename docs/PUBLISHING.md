@@ -1,61 +1,21 @@
-# Publishing (SPEC Phase 9)
+# Publishing
 
-Text and answers for the store listings. Nothing here has been submitted, and DRA has not been contacted.
+Where publishing stands. The text and images to paste into the Chrome Web Store are in [STORE_SUBMISSION.md](STORE_SUBMISSION.md); the privacy policy is [PRIVACY.md](../PRIVACY.md).
 
-## Before the first release
+## Decided
 
-1. Run the live checks in `RECON.md` on davesredistricting.org and fix whatever they turn up.
-2. Email DRA (draft below) and wait for a reply. Their Terms of Use bar automated access and derivative use; this extension only paints when the user switches that option on and clicks for each step, but it is their call. SPEC.md still describes the original read-only design.
-3. Put the data bundles on Cloudflare R2 behind a custom domain (`pipeline/upload_r2.py`, not yet run) and build with `ZD_DATA_URL` set to it.
-4. Decide the mini-map tile source (see "Open decisions").
-5. Fill in the placeholders marked `TODO` below.
+- **Name:** Zero Deviation. Dave's Redistricting is named in the summary and description, with a "not affiliated" line.
+- **Data host:** GitHub Pages, from the [zero-deviation-data](https://github.com/jetpackrider/zero-deviation-data) repo, at `https://jetpackrider.github.io/zero-deviation-data/v1`. It is the store build's default; `ZD_DATA_URL` overrides it at build time. To republish after a pipeline run: `uv run publish_pages.py <checkout of that repo>` in `pipeline/`, then commit and push there. `HOSTED=1 npx playwright test zz-hosted-data zz-store-build` in `apps/extension` checks the host and the store build against it.
+- **Mini-map tiles:** none by default. The fallback mini-map draws blocks on a plain background, so the extension contacts no third party. A basemap is opt-in through the `miniMapTiles` setting.
+- **First listing:** unlisted, non-trader account, "Paint steps for me" included (off by default).
+- **Code license:** PolyForm Noncommercial 1.0.0. Data: CC BY-SA 4.0.
 
-## Privacy policy
+## Still open
 
-> Zero Deviation reads the district plan you have open on davesredistricting.org and works out which census blocks to move. All of that happens inside your browser. Your plan, your district assignments and your account details are never sent to us or to anyone else, and the extension has no analytics, no tracking and no accounts. It makes two kinds of network request of its own. It downloads public census data files for the state you are working on from our data host (TODO: domain), which tells that host which state you asked for and nothing about your plan. And if it cannot draw on DRA's own map, it shows a small fallback map whose background tiles come from OpenStreetMap, which tells OpenStreetMap's servers which area the map is showing. The extension stores the downloaded data files and a few settings on your device; removing the extension removes them. Contact: TODO.
-
-## Store listing
-
-**Name:** Zero Deviation for Dave's Redistricting (TODO: confirm name; check DRA is comfortable with their name in it)
-
-**Short description (132 characters max on the Chrome Web Store):**
-Finds the census blocks that bring a district, a group, or a whole map to zero deviation in Dave's Redistricting, and walks you there.
-
-**Description:**
-
-Getting the last few people out of a district in Dave's Redistricting means hunting along the border for blocks that add up to exactly the right number without cutting anything off. This extension does the hunting.
-
-Open a map on davesredistricting.org and open the side panel. Pick one district, a group of districts, or the whole map. The extension reads your plan as it is right now, including edits you have not committed, and offers ranked ways to reach zero: how many people and blocks move, how many precincts and counties get split, and what happens to each neighbor. Pick one and it walks you through it precinct by precinct, highlighting the blocks on DRA's own map and ticking each one off as you paint it. If you prefer, an optional setting paints the current step for you when you click.
-
-- You paint. The extension does not change your map unless you turn on "Paint steps for me", and then only one step each time you click the button.
-- Zero means zero: every district ends at the ideal population, or one person off when the state does not divide evenly.
-- Districts stay in one piece. Every suggestion is checked for contiguity on both sides.
-- Where a small number cannot be moved one way, it trades across the border in both directions.
-- Your plan never leaves your browser.
-
-Works on maps drawn on 2020 census shapes with single-member, equal-population districts. Not affiliated with Dave's Redistricting.
-
-Data: contains data adapted from Dave's Redistricting (github.com/dra2020), CC BY-SA 4.0. Census data is from the U.S. Census Bureau and is in the public domain. The data files this extension downloads are shared under CC BY-SA 4.0.
-
-**Category:** Productivity / Developer tools (whichever the store offers).
-
-## Permission justifications
-
-| Permission | Why |
-|---|---|
-| `https://davesredistricting.org/*` | Read the plan from the open map and draw highlights on it. |
-| `sidePanel` | The panel that lists options and steps. |
-| `storage` | A few settings. |
-| `unlimitedStorage` | Cache the per-state census data files (tens of MB per state) so they download once. |
-
-Single purpose: help balance district populations in Dave's Redistricting. No remote code: the extension downloads data files only.
-
-## Data disclosure answers
-
-- Collects or transmits user data: **no**. The plan being drawn counts as user data under the Web Store rules, and it stays on the device.
-- Sold or transferred to third parties: **no**.
-- Used for purposes unrelated to the single purpose: **no**.
-- Firefox, when that build exists: declare `data_collection_permissions` as none required.
+1. **DRA has not been asked.** Their Terms of Use bar automated access and derivative use. The extension paints only when the user turns that option on and clicks for each step, but it is their call. The draft below is ready to send; the listing stays unlisted until this is settled.
+2. **Live checks.** `RECON.md` lists the checks to run on davesredistricting.org; so far the extension has been used by hand on New York maps only.
+3. **GitHub Pages limits.** Pages is meant for sites under 1 GB with about 100 GB of traffic a month. The data is 586 MB in all; a first use downloads up to 12 MB and at most 47 MB for a whole state, so this holds for a few thousand first-time downloads a month. Past that, move the files to object storage (`pipeline/upload_r2.py` targets Cloudflare R2) and change the build's default URL.
+4. **Other stores.** Edge, Opera and Firefox builds are not prepared. Firefox would need `data_collection_permissions` declared as none.
 
 ## Draft email to DRA (feedback@davesredistricting.org)
 
@@ -76,9 +36,3 @@ Single purpose: help balance district populations in Dave's Redistricting. No re
 >
 > Thanks,
 > TODO
-
-## Open decisions
-
-- **Data host domain.** R2 behind a custom domain; the spec rules out `r2.dev`.
-- **Mini-map tiles.** The fallback mini-map uses `tile.openstreetmap.org` by default (overridable through the `miniMapTiles` setting). OpenStreetMap's tile servers are not meant for distributed apps at scale and need visible attribution. Before publishing, either move to a tile provider you have an account with or drop the basemap and draw the blocks alone. The privacy policy above discloses the current behavior and must change with it.
-- **Listing visibility.** Public or unlisted; either way store installs update on their own, which matters when a DRA change breaks the page hook.
