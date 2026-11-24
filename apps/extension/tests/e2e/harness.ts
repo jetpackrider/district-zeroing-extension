@@ -40,7 +40,7 @@ export async function startServer(opts: { data?: string } = {}): Promise<{ url: 
 export const REAL_DATA = resolve(ROOT, '../../data');
 export const hasRealNY = () => existsSync(join(REAL_DATA, 'NY/manifest.json')) && existsSync(join(ROOT, 'fixture/www/plan-real-ny.json'));
 
-export async function launch(opts: { data?: string } = {}): Promise<Harness> {
+export async function launch(opts: { data?: string; scale?: number } = {}): Promise<Harness> {
   if (!existsSync(join(EXT, 'manifest.json'))) throw new Error('Build the test extension first: npm run build:test');
   const server = await startServer(opts);
   const profile = mkdtempSync(join(tmpdir(), 'zd-pw-'));
@@ -48,6 +48,7 @@ export async function launch(opts: { data?: string } = {}): Promise<Harness> {
     channel: 'chromium',
     headless: process.env.HEADED ? false : true,
     viewport: { width: 1280, height: 800 },
+    deviceScaleFactor: opts.scale ?? 1,
     args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`],
   });
   let sw = context.serviceWorkers()[0];
