@@ -117,7 +117,7 @@ This is a working pre-release, and it helps to know exactly how far it has been 
 
 - **Tested by machine:** about 200 unit tests and 69 browser tests. The browser tests drive the real extension against a stand-in for the DRA page, including New York's enacted congressional plan on the real New York data.
 - **Data:** bundles for all 50 states and DC build and pass validation against DRA's published populations and precinct graph.
-- **On the live site:** used by hand on New York maps. The paint button is the least-tested part there.
+- **On the live site:** used by hand on New York maps, paint button included. Other states have only been through the automated tests.
 - **Supported maps:** 2020 census shapes, single-member districts, equal population, whole-state maps. Anything else gets a clear message and no suggestions.
 - **Known gaps:** a 203-district map (Pennsylvania's House) is not solved as a whole map; solve it in groups. Whole-map plans for California and Texas took 16 to 24 seconds when last measured.
 - **It leans on DRA's page internals,** which are not a supported interface. When DRA changes them, a startup self-check says which part broke, and you can still drop in DRA's block-assignment CSV export and work from that.
