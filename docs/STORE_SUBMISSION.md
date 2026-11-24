@@ -108,3 +108,13 @@ First use of a state downloads its data from jetpackrider.github.io.
 ## After it is approved
 
 Add the store link to the README's "Build it" section, and update `docs/PUBLISHING.md`.
+
+# Opera add-ons
+
+Upload `zdextension-<version>-opera.zip` (`npm run build:opera && npx wxt zip -b opera` in `apps/extension`) at [addons.opera.com/developer](https://addons.opera.com/developer/). Delete the `-sources.zip` that `wxt zip` also writes: it holds only `apps/extension`, not the whole project.
+
+- **General (package):** category Productivity; tick "Hide the add-on from search results" for an unlisted release; leave auto-publishing off.
+- **Version, General tab:** support URL and public source URL as for Chrome; moderator source URL `https://github.com/jetpackrider/district-zeroing-extension/tree/v<version>` (tag the release first); build instructions are the commands above plus the Node and npm versions used; license URL `.../blob/main/LICENSE`; privacy policy URL as for Chrome. A clean build from the tag reproduces the package file for file, which the moderators can check.
+- **Translations tab:** the Chrome description, with "side panel" read as "sidebar"; changelog.
+- **Media tab:** the three screenshots, and `docs/store/icon-64.png` (`node scripts/make-icons.mjs --opera`).
+- **Submit changes** on the version's General tab sends it to the moderators. Nothing is saved until then.
