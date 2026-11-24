@@ -144,6 +144,12 @@ Your plan never leaves your browser. The extension has no analytics, no accounts
 
 Run everything with `npm run test:all` (the browser tests need `npx playwright install chromium` once, inside `apps/extension`). `SCREENS=1 npx playwright test zz-screens` in `apps/extension` regenerates the screenshots above, and `python3 docs/readme/make-hero.py` the banner.
 
+## License
+
+Free to use, change and share for any noncommercial purpose under the [PolyForm Noncommercial License 1.0.0](LICENSE), as long as you keep the license and the copyright notice with it, which is how credit is given. For commercial use, [open an issue](https://github.com/jetpackrider/district-zeroing-extension/issues) and ask.
+
+The data bundles are licensed separately; see below.
+
 ## Data and credit
 
 Block populations and precinct assignments are adapted from [Dave's Redistricting](https://github.com/dra2020) data, shared under CC BY-SA 4.0; bundles built from it carry the same license. Block shapes and census counts are from the U.S. Census Bureau and are in the public domain.
