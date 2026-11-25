@@ -117,4 +117,5 @@ Upload `zdextension-<version>-opera.zip` (`npm run build:opera && npx wxt zip -b
 - **Version, General tab:** support URL and public source URL as for Chrome; moderator source URL `https://github.com/jetpackrider/district-zeroing-extension/tree/v<version>` (tag the release first); build instructions are the commands above plus the Node and npm versions used; license URL `.../blob/main/LICENSE`; privacy policy URL as for Chrome. A clean build from the tag reproduces the package file for file, which the moderators can check.
 - **Translations tab:** the Chrome description, with "side panel" read as "sidebar"; changelog.
 - **Media tab:** the three screenshots, and `docs/store/icon-64.png` (`node scripts/make-icons.mjs --opera`).
-- **Submit changes** on the version's General tab sends it to the moderators. Nothing is saved until then.
+- **Each field saves on its own** when you press Enter or click its green ✓; uploaded images save when you click the upload button under them. "Copy metadata from version" copies only fields that were saved this way.
+- **Submit changes** on the version's General tab sends it to the moderators.
