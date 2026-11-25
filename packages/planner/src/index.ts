@@ -8,3 +8,4 @@ export { verifyPlan, type PlanCheckInput, type PlanCheckResult, type PlanIssue, 
 export { planMetrics } from './stats';
 export { districtPopulations, districtAdjacency, unassignedContact, unassignedPermitted } from './districts';
 export { DEFAULT_WEIGHTS, resolveWeights } from './weights';
+export { findCountyClusters, verifyClustering, countyGraph, type CountyGraph, type ClusterSearchOptions, type ClusteringCheck } from './clusters';

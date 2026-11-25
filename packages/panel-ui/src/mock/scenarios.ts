@@ -202,11 +202,19 @@ export const SINGLE_DISTRICT_SOLUTIONS: SolutionCard[] = [
  * Mock options for one district when the user picked which neighbors trade with it: one option per
  * picked neighbor taking (or giving) the whole difference, plus one split between the first two.
  */
-export function makeChosenNeighborOptions(districts: DistrictRow[], district: number, withList: number[]): SolutionCard[] {
+export function makeChosenNeighborOptions(
+  districts: DistrictRow[],
+  district: number,
+  withList: number[],
+  goal?: -1 | 0 | 1,
+): SolutionCard[] {
   const row = districts.find((d) => d.index === district);
   if (!row || withList.length === 0) return [];
-  const people = Math.abs(row.deviation);
-  const over = row.deviation > 0;
+  const delta = row.deviation - (goal ?? 0);
+  const people = Math.abs(delta);
+  if (people === 0) return [];
+  const over = delta > 0;
+  const afterDistrict = goal ?? 0;
   const flow = (nbr: number, n: number) => (over ? { from: district, to: nbr, people: n } : { from: nbr, to: district, people: n });
   const devOf = (nbr: number) => districts.find((d) => d.index === nbr)?.deviation ?? 0;
   const stats = (blocks: number, steps: number, splits: number, touched: number, cost: number) => ({
@@ -221,11 +229,11 @@ export function makeChosenNeighborOptions(districts: DistrictRow[], district: nu
     kind: 'single',
     stats: stats(4 + i * 3 + (nbr % 3), 2 + i + (nbr % 2), i === 0 ? 0 : 1, 2, 20 + i * 90),
     borderFlows: [flow(nbr, people)],
-    deviations: [{ district, before: row.deviation, after: 0 }, ...devRow(nbr, devOf(nbr) + row.deviation)],
+    deviations: [{ district, before: row.deviation, after: afterDistrict }, ...devRow(nbr, devOf(nbr) + delta)],
   }));
-  if (withList.length >= 2) {
+  if (withList.length >= 2 && people >= 2) {
     const [a, b] = withList;
-    const first = Math.round(people * 0.6);
+    const first = Math.max(1, Math.min(people - 1, Math.round(people * 0.6)));
     const sign = over ? 1 : -1;
     cards.push({
       id: `opt-${district}-split-${a}-${b}`,
@@ -233,7 +241,7 @@ export function makeChosenNeighborOptions(districts: DistrictRow[], district: nu
       stats: stats(11, 5, 1, 3, 210),
       borderFlows: [flow(a, first), flow(b, people - first)],
       deviations: [
-        { district, before: row.deviation, after: 0 },
+        { district, before: row.deviation, after: afterDistrict },
         ...devRow(a, devOf(a) + sign * first),
         ...devRow(b, devOf(b) + sign * (people - first)),
       ].sort((x, y) => x.district - y.district),
@@ -796,6 +804,90 @@ export function makeDrawingWalkthroughSteps(): WalkthroughStep[] {
   ];
 }
 
+/**
+ * A mock area the user "drew" on the map (lower Manhattan, roughly): one closed ring of
+ * [longitude, latitude], first point not repeated (AreaState.ring), with made-up counts inside.
+ */
+export const AREA_DRAWN_RING: Array<[number, number]> = [
+  [-74.0189, 40.7006],
+  [-73.9712, 40.7095],
+  [-73.9654, 40.7442],
+  [-73.9931, 40.7618],
+  [-74.0153, 40.7402],
+];
+export const AREA_DRAWN_COUNTS = { blocks: 1284, people: 61530 };
+
+/** A mock "Use map view": the rectangle of the map in view, with made-up counts inside. */
+export const AREA_VIEW_RING: Array<[number, number]> = [
+  [-74.0419, 40.6829],
+  [-73.9071, 40.6829],
+  [-73.9071, 40.7891],
+  [-74.0419, 40.7891],
+];
+export const AREA_VIEW_COUNTS = { blocks: 4702, people: 312845 };
+
+/** District 13's options with an area set (Prefer): three inside, the last one fills in from outside. */
+export function makeAreaPreferSolutions(): SolutionCard[] {
+  const last = SINGLE_DISTRICT_SOLUTIONS.length - 1;
+  return SINGLE_DISTRICT_SOLUTIONS.map((card, i) => ({
+    ...card,
+    stats: { ...card.stats, outsideArea: i === last ? 4 : 0 },
+  }));
+}
+
+/** New York's 62 counties in bundle county-index order (alphabetical; index 30 = New York County). */
+export const NY_COUNTY_NAMES: string[] = [
+  'Albany', 'Allegany', 'Bronx', 'Broome', 'Cattaraugus', 'Cayuga', 'Chautauqua', 'Chemung',
+  'Chenango', 'Clinton', 'Columbia', 'Cortland', 'Delaware', 'Dutchess', 'Erie', 'Essex',
+  'Franklin', 'Fulton', 'Genesee', 'Greene', 'Hamilton', 'Herkimer', 'Jefferson', 'Kings',
+  'Lewis', 'Livingston', 'Madison', 'Monroe', 'Montgomery', 'Nassau', 'New York', 'Niagara',
+  'Oneida', 'Onondaga', 'Ontario', 'Orange', 'Orleans', 'Oswego', 'Otsego', 'Putnam',
+  'Queens', 'Rensselaer', 'Richmond', 'Rockland', 'St. Lawrence', 'Saratoga', 'Schenectady',
+  'Schoharie', 'Schuyler', 'Seneca', 'Steuben', 'Suffolk', 'Sullivan', 'Tioga', 'Tompkins',
+  'Ulster', 'Warren', 'Washington', 'Wayne', 'Westchester', 'Wyoming', 'Yates',
+].map((name) => `${name} County`);
+
+export type MockClustering = NonNullable<PanelState['clusters']>['results'][number];
+
+/**
+ * Made-up county clusterings for the mock (not contiguous or real populations): up to three
+ * options, most clusters first, each covering every county once with the districts summing to
+ * `numDistricts` and every deviation inside `tolerance`. The first cluster of each option takes
+ * the most counties, so long county lists show up.
+ */
+export function makeMockClusterings(
+  numDistricts: number,
+  tolerance: number,
+  totalPop = NY_MAP_INFO.totalPop,
+  names: string[] = NY_COUNTY_NAMES,
+): MockClustering[] {
+  const size = totalPop / numDistricts;
+  const most = Math.max(1, Math.min(numDistricts, names.length, Math.ceil(numDistricts * 0.6)));
+  const counts = [most, most - 1, most - 2].filter((m) => m >= 1);
+  const extra = (m: number) => names.length - m;
+  const start = (m: number, i: number) => i + Math.floor(extra(m) * (1 - ((m - i) / m) ** 2));
+  return counts.map((m, option) => {
+    const clusters = Array.from({ length: m }, (_, i) => {
+      const districts = Math.floor(numDistricts / m) + (i < numDistricts % m ? 1 : 0);
+      const counties = Array.from({ length: start(m, i + 1) - start(m, i) }, (_, j) => start(m, i) + j);
+      const deviationPct = m === 1 ? 0 : Math.round(Math.sin((i + 1) * 2.3 + option) * tolerance * (0.55 + 0.15 * option) * 10000) / 10000;
+      const deviation = Math.round(deviationPct * size);
+      return { counties, districts, pop: Math.round((size + deviation) * districts), deviation, deviationPct };
+    }).sort((a, b) => b.pop - a.pop);
+    return {
+      id: `mock-${numDistricts}-${tolerance}-${m}`,
+      clusters,
+      stats: {
+        clusterCount: m,
+        singleCounty: clusters.filter((c) => c.counties.length === 1).length,
+        maxAbsDeviationPct: Math.max(...clusters.map((c) => Math.abs(c.deviationPct))),
+        largestClusterCounties: Math.max(...clusters.map((c) => c.counties.length)),
+      },
+      countyNames: clusters.map((c) => c.counties.map((j) => names[j])),
+    };
+  });
+}
+
 export type ScenarioId =
   | 'live-single'
   | 'live-single-give-to'
@@ -809,6 +901,11 @@ export type ScenarioId =
   | 'live-drawing-unassigned'
   | 'live-finished-unassigned-adjacent'
   | 'mini-map-options'
+  | 'live-area-prefer'
+  | 'live-area-only-none'
+  | 'live-area-unavailable'
+  | 'clusters-results'
+  | 'clusters-none'
   | 'walkthrough-live'
   | 'walkthrough-twoway'
   | 'walkthrough-unassigned'
@@ -1070,6 +1167,128 @@ export const SCENARIOS: Record<ScenarioId, ScenarioDefinition> = {
       solutions: GROUP_CHAIN_SOLUTIONS,
       hoveredSolutionId: 'plan-splits',
       mapMode: 'mini',
+    }),
+  },
+
+  'live-area-prefer': {
+    id: 'live-area-prefer',
+    category: 'Live & Scope',
+    label: 'Live: Area set (Prefer), one option outside',
+    description:
+      'District 13 with an area drawn on the map in Prefer mode: three options inside it, the fourth fills in with 4 blocks outside.',
+    createState: () => ({
+      connection: 'live',
+      map: NY_MAP_INFO,
+      districts: makeNYDistricts(),
+      scope: { mode: 'one', district: 13 },
+      area: { ring: AREA_DRAWN_RING.map((p) => [p[0], p[1]] as [number, number]), mode: 'prefer', ...AREA_DRAWN_COUNTS, drawing: false },
+      regions: {
+        counties: [{ index: 30, name: 'New York County' }, { index: 51, name: 'Suffolk County' }],
+        towns: [{ index: 339, name: 'Huntington town' }, { index: 529, name: 'New York city' }],
+      },
+      solve: {
+        status: 'done',
+        elapsedMs: 44,
+        message: 'Only 3 options fit inside your area; the last one moves 4 blocks outside it.',
+      },
+      solutions: makeAreaPreferSolutions(),
+    }),
+  },
+
+  'live-area-only-none': {
+    id: 'live-area-only-none',
+    category: 'Live & Scope',
+    label: 'Live: Area set (Only), nothing inside',
+    description: 'District 13 with Only mode on an area too small: nothing can be done inside it, and the panel says the area is why.',
+    createState: () => ({
+      connection: 'live',
+      map: NY_MAP_INFO,
+      districts: makeNYDistricts(),
+      scope: { mode: 'one', district: 13 },
+      area: { ring: AREA_DRAWN_RING.map((p) => [p[0], p[1]] as [number, number]), mode: 'only', blocks: 37, people: 190, drawing: false },
+      solve: {
+        status: 'done',
+        elapsedMs: 21,
+        message:
+          'Nothing can be done inside your area: it holds 190 people along District 13\'s borders, fewer than the 412 to move. Choose Prefer to allow moves outside it, or mark a larger area.',
+      },
+      solutions: [],
+    }),
+  },
+
+  'live-area-unavailable': {
+    id: 'live-area-unavailable',
+    category: 'Live & Scope',
+    label: 'Live: Area, no DRA map to draw on',
+    description: 'Mini-map fallback: drawing on DRA\'s map is off, but "Use map view" still takes the mini-map\'s view.',
+    createState: () => ({
+      connection: 'live',
+      notice: {
+        level: 'info',
+        text: 'DRA map handle unavailable — previews render in the panel mini-map.',
+      },
+      map: NY_MAP_INFO,
+      districts: makeNYDistricts(),
+      scope: { mode: 'one', district: 13 },
+      area: {
+        mode: 'prefer',
+        drawing: false,
+        unavailable: 'No DRA map to draw on. "Use map view" takes the part of the mini-map in view.',
+      },
+      solve: { status: 'idle' },
+      solutions: [],
+      mapMode: 'mini',
+    }),
+  },
+
+  'clusters-results': {
+    id: 'clusters-results',
+    category: 'Live & Scope',
+    label: 'Live: County clusters found',
+    description:
+      'County clusters for 26 districts at ±5%: three clusterings, best found in 10 s (not exhaustive). Open "County clusters" to see them.',
+    createState: () => ({
+      connection: 'live',
+      map: NY_MAP_INFO,
+      districts: makeNYDistricts(),
+      scope: { mode: 'one', district: 13 },
+      solve: { status: 'idle' },
+      solutions: [],
+      clusters: {
+        status: 'done',
+        numDistricts: 26,
+        tolerance: 0.05,
+        districtSize: NY_MAP_INFO.totalPop / 26,
+        results: makeMockClusterings(26, 0.05),
+        exhaustive: false,
+        elapsedMs: 10000,
+      },
+    }),
+  },
+
+  'clusters-none': {
+    id: 'clusters-none',
+    category: 'Live & Scope',
+    label: 'Live: County clusters, none fit',
+    description: 'County clusters for 26 districts at ±0.5%: no clustering of whole counties fits, and the panel says why.',
+    createState: () => ({
+      connection: 'live',
+      map: NY_MAP_INFO,
+      districts: makeNYDistricts(),
+      scope: { mode: 'one', district: 13 },
+      solve: { status: 'idle' },
+      solutions: [],
+      clusters: {
+        status: 'none',
+        numDistricts: 26,
+        tolerance: 0.005,
+        districtSize: NY_MAP_INFO.totalPop / 26,
+        results: [],
+        exhaustive: true,
+        elapsedMs: 840,
+        message:
+          'No grouping of whole counties keeps every district within ±0.5% of 776,971. Try a wider tolerance.',
+      },
     }),
   },
 

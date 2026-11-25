@@ -1,4 +1,5 @@
 import { mountPanel } from '../../adapters/panel-ui';
+import { cleanSavedAreas } from '../../panel/area';
 import { ExtensionController } from '../../panel/controller';
 import { createMiniMap } from '../../panel/minimap';
 import type { PanelHost } from '../../shared/panel-host';
@@ -13,7 +14,7 @@ function resolveDataUrl(url: string): string {
 }
 
 async function main() {
-  const settings = await chrome.storage.local.get(['dataBaseUrl', 'miniMapTiles', 'autoPaint', 'districtLocks']);
+  const settings = await chrome.storage.local.get(['dataBaseUrl', 'miniMapTiles', 'autoPaint', 'districtLocks', 'areas']);
   const dataBaseUrl = resolveDataUrl((settings.dataBaseUrl as string) || __ZD_DATA_URL__);
   // The fallback mini-map draws the blocks on a plain background. A basemap is opt-in (the
   // `miniMapTiles` setting), so the extension makes no third-party requests on its own.
@@ -30,12 +31,17 @@ async function main() {
       saved: settings.districtLocks && typeof settings.districtLocks === 'object' ? (settings.districtLocks as Record<string, number[]>) : {},
       save: (all) => void chrome.storage.local.set({ districtLocks: all }),
     },
+    // The area to prefer for the swap, remembered per map like the locks.
+    areas: {
+      saved: cleanSavedAreas(settings.areas),
+      save: (all) => void chrome.storage.local.set({ areas: all }),
+    },
   });
   const root = document.getElementById('root')!;
   mountPanel(root, controller, {
     renderMiniMap: (container) => {
       const mm = createMiniMap(container, { tiles });
-      controller.attachMiniSink(mm.sink);
+      controller.attachMiniSink(mm.sink, mm.area, mm.clusters);
       return () => {
         controller.attachMiniSink(null);
         mm.destroy();

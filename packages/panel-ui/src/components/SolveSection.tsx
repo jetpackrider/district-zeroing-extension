@@ -1,5 +1,5 @@
 import type { PanelAction, PanelState } from '@zd/contracts';
-import { formatElapsed } from '../format';
+import { formatElapsed, formatSigned, isAreaFailure } from '../format';
 
 interface SolveSectionProps {
   state: PanelState;
@@ -13,14 +13,23 @@ export function SolveSection({ state, dispatch }: SolveSectionProps) {
   const solveBlocked =
     isBusy || emptyGroup || connection === 'data-mismatch' || connection === 'unsupported-map';
 
+  const goal = scope.mode === 'one' ? scope.goal : undefined;
   const buttonLabel =
     scope.mode === 'one'
       ? solutions.length > 0
         ? 'Re-solve district'
-        : 'Find zeroing options'
+        : goal !== undefined
+          ? `Find options for ${formatSigned(goal)}`
+          : 'Find zeroing options'
       : solutions.length > 0
         ? 'Re-solve plans'
         : 'Find balancing plans';
+
+  // A solve that found nothing because of the user's area: the controller's message says so, and
+  // the callout offers the two ways out (allow outside, or drop the area) instead of the heading
+  // for whatever status it came back with.
+  const areaFailed = isAreaFailure(state);
+  const areaMode = state.area?.mode ?? 'prefer';
 
   const pct =
     solve.progress !== undefined
@@ -28,7 +37,7 @@ export function SolveSection({ state, dispatch }: SolveSectionProps) {
       : null;
 
   return (
-    <section aria-label="Solver controls and status" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <section aria-label="Solver controls and status" className="zd-stack">
       <div className="zd-solve-btn-row">
         <button
           type="button"
@@ -59,7 +68,7 @@ export function SolveSection({ state, dispatch }: SolveSectionProps) {
                   ? 'Downloading state block graph…'
                   : 'Searching border moves…')}
             </span>
-            {pct !== null && <span className="zd-num" style={{ fontWeight: 650 }}>{pct}%</span>}
+            {pct !== null && <span className="zd-num zd-emphasis">{pct}%</span>}
           </div>
           <div
             className="zd-progress-track"
@@ -76,17 +85,42 @@ export function SolveSection({ state, dispatch }: SolveSectionProps) {
         </div>
       )}
 
-      {solve.status === 'done' && (
+      {areaFailed && (
+        <div className="zd-note zd-note--warn" role="alert" data-testid="area-solve-failed">
+          <p className="zd-note__title">Nothing found in your area</p>
+          <p className="zd-note__text">{solve.message}</p>
+          <div className="zd-area__actions">
+            {areaMode === 'only' && (
+              <button
+                type="button"
+                className="zd-btn zd-btn--sm"
+                onClick={() => dispatch({ type: 'set-area-mode', mode: 'prefer' })}
+              >
+                Prefer the area instead
+              </button>
+            )}
+            <button type="button" className="zd-btn zd-btn--sm" onClick={() => dispatch({ type: 'area-clear' })}>
+              Clear area
+            </button>
+          </div>
+        </div>
+      )}
+
+      {solve.status === 'done' && !areaFailed && (
         <div
-          className={solutions.length === 0 ? 'zd-callout zd-callout--ok' : 'zd-solve-status__row'}
+          className={solutions.length === 0 ? 'zd-note zd-note--success' : 'zd-solve-status__row zd-solve-summary'}
           role="status"
-          style={solutions.length > 0 ? { fontSize: 11.5, color: 'var(--zd-text-muted)', padding: '0 2px' } : undefined}
         >
           {solutions.length === 0 ? (
             <>
-              <p className="zd-callout__title">✓ Already at zero deviation</p>
-              <p className="zd-callout__text">
-                {solve.message ?? 'Every selected district is already within target (0 or ±1).'}
+              <p className="zd-note__title">
+                {goal !== undefined ? `✓ Already at ${formatSigned(goal)}` : '✓ Already at zero deviation'}
+              </p>
+              <p className="zd-note__text">
+                {solve.message ??
+                  (goal !== undefined
+                    ? `This district is already at ${formatSigned(goal)}.`
+                    : 'Every selected district is already within target (0 or ±1).')}
               </p>
             </>
           ) : (
@@ -103,7 +137,7 @@ export function SolveSection({ state, dispatch }: SolveSectionProps) {
                 ready · hover to preview, click to start walkthrough
               </span>
               {solve.elapsedMs !== undefined && (
-                <span className="zd-num" style={{ whiteSpace: 'nowrap', flex: 'none' }}>
+                <span className="zd-num zd-solve-time">
                   {formatElapsed(solve.elapsedMs)}
                 </span>
               )}
@@ -112,33 +146,40 @@ export function SolveSection({ state, dispatch }: SolveSectionProps) {
         </div>
       )}
 
-      {solve.status === 'needs-precinct-rework' && (
-        <div className="zd-callout zd-callout--warn" role="alert">
-          <p className="zd-callout__title">Needs precinct-level rework</p>
-          <p className="zd-callout__text">
+      {/* Messages that come with options (e.g. why some go outside the area): show them as they come. */}
+      {solve.status === 'done' && solutions.length > 0 && solve.message && (
+        <p className="zd-note zd-note--info" data-testid="solve-note">
+          {solve.message}
+        </p>
+      )}
+
+      {solve.status === 'needs-precinct-rework' && !areaFailed && (
+        <div className="zd-note zd-note--warn" role="alert">
+          <p className="zd-note__title">Needs precinct-level rework</p>
+          <p className="zd-note__text">
             {solve.message ??
               'This deviation is too large to close along the current block border without cutting a district. Move whole precincts in DRA first, then solve again.'}
           </p>
         </div>
       )}
 
-      {solve.status === 'group-unbalanced' && (
-        <div className="zd-callout zd-callout--warn" role="alert">
-          <p className="zd-callout__title">Group cannot balance on its own</p>
-          <p className="zd-callout__text">
+      {solve.status === 'group-unbalanced' && !areaFailed && (
+        <div className="zd-note zd-note--warn" role="alert">
+          <p className="zd-note__title">Group cannot balance on its own</p>
+          <p className="zd-note__text">
             {solve.message ??
               'The selected districts have too much net excess or deficit to zero internally. Add one of the suggested neighboring districts above, or allow outside neighbors to absorb.'}
           </p>
         </div>
       )}
 
-      {solve.status === 'error' && (
-        <div className="zd-callout zd-callout--error" role="alert">
-          <p className="zd-callout__title">Solver error</p>
-          <p className="zd-callout__text">
+      {solve.status === 'error' && !areaFailed && (
+        <div className="zd-note zd-note--error" role="alert">
+          <p className="zd-note__title">Solver error</p>
+          <p className="zd-note__text">
             {solve.message ?? 'Could not compute balancing moves. Try again.'}
           </p>
-          <div style={{ marginTop: 4 }}>
+          <div>
             <button
               type="button"
               className="zd-btn zd-btn--sm"

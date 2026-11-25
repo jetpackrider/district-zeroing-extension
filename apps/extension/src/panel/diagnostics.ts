@@ -49,6 +49,8 @@ export interface DiagnosticsInput {
   solve: PanelState['solve'];
   /** "Paint the step for me": the hook's check, the remembered setting, what the panel shows, the last outcome. */
   paint?: { availability: PaintAvailability | null; setting: boolean; shown: PanelState['autoPaint'] | null; last: string | null };
+  /** The user's area (PanelState.area), without its coordinates: they stay out of copied text. */
+  area?: { corners: number; mode: string; blocks?: number; people?: number; drawing: boolean; unavailable?: string; points: boolean | null; pointsLoaded?: boolean | null; maskMs: number } | null;
   perf: Record<string, number>;
 }
 
@@ -133,6 +135,18 @@ export function buildDiagnostics(d: DiagnosticsInput): string {
       for (const c of a.checks) out.push(`  ${c.ok ? 'ok  ' : 'FAIL'} ${c.name}${c.detail ? ` - ${c.detail}` : ''}`);
     }
     line('last paint', d.paint.last ?? 'none this session');
+  }
+
+  out.push('', '[area]');
+  if (!d.area) out.push('none');
+  else {
+    const a = d.area;
+    line('area', a.corners ? `${a.corners} corners, ${a.mode}${a.blocks !== undefined ? `, ${n(a.blocks)} blocks / ${n(a.people ?? 0)} people inside` : ''}` : `none drawn (${a.mode})`);
+    if (a.drawing) line('drawing', 'yes');
+    if (a.unavailable) line('unavailable', a.unavailable);
+    line('block points in bundle', a.points === null ? 'bundle not loaded' : a.points ? 'yes' : 'no');
+    if (a.points) line('block points read', a.pointsLoaded ? 'yes' : 'not yet (read when an area needs them)');
+    if (a.maskMs) line('inside mask ms', a.maskMs.toFixed(0));
   }
 
   out.push('', '[solver]');

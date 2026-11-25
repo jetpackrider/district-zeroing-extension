@@ -27,7 +27,7 @@
  *   model.readonly, model.frozen, model.css.bInSession, model.districtLocked(i), model.sm, model.undoredo.cur
  */
 
-import type { HookBlockMapping, HookCheckItem, HookDistrict, HookId, HookMapInfo, HookSeen, PaintAvailability, PaintResult, PaintStepRequest, SelfCheck } from '../shared/protocol';
+import type { HookBlockMapping, HookCheckItem, HookDistrict, HookId, HookMapInfo, HookSeen, PaintAvailability, PaintResult, PaintStepRequest, SelfCheck, UndoPaintRequest, UndoPaintResult } from '../shared/protocol';
 import { decodeBitset, isBlockId } from '../panel/assignment';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -343,6 +343,9 @@ function looksLikeMap(m: Any): boolean {
   return !!m && typeof m.addLayer === 'function' && typeof m.getStyle === 'function' && typeof m.on === 'function';
 }
 
+/** The map functions area drawing calls (src/hook/area.ts). */
+export const AREA_MAP_FUNCTIONS = ['project', 'unproject', 'getCanvas', 'getContainer', 'panBy', 'easeTo', 'getZoom'] as const;
+
 /** DRA's map: env.theMap, else the instance trapped from the mapboxgl.Map constructor. */
 export function getMap(): Any | null {
   try {
@@ -449,6 +452,15 @@ export function selfCheck(opts: { light?: boolean; prevSeen?: HookSeen } = {}): 
     if (looksLikeMap(map)) return 'env.theMap';
     if (getMap()) return 'trapped mapboxgl.Map instance';
     throw new Error('no map handle');
+  });
+  // Area drawing (src/hook/area.ts) needs a few more of the map's functions. Optional: without them
+  // only drawing is off; the panel says so.
+  p('map.unproject() (area drawing)', false, () => {
+    const map = mapForcedMissing() ? null : getMap();
+    if (!map) throw new Error('no map handle');
+    const missing = AREA_MAP_FUNCTIONS.filter((f) => typeof map[f] !== 'function');
+    if (missing.length) throw new Error(`missing ${missing.join(', ')}`);
+    return 'ok';
   });
   const firstFailure = items.find((i) => i.required && !i.ok)?.id;
   return { ok: !firstFailure, mapOk, items, firstFailure, seen: opts.light && opts.prevSeen ? opts.prevSeen : readSeen() };
@@ -631,6 +643,38 @@ export function paintSignature(m: Any): string {
   } catch {
     return 'p?';
   }
+}
+
+const undoEntryIds = new WeakMap<object, number>();
+let nextUndoEntryId = 1;
+
+/** DRA's current undo cursor and an opaque id for its top stack entry (never mutates DRA). */
+export function readUndoPos(m: Any = getModel()): { cur: number; topId?: number } | undefined {
+  try {
+    const ur = m.undoredo;
+    if (!ur || typeof ur.cur !== 'number' || !Number.isFinite(ur.cur)) return undefined;
+    const cur = ur.cur;
+    let topId: number | undefined;
+    if (cur > 0 && Array.isArray(ur.stack)) {
+      const top = ur.stack[cur - 1];
+      if (top && typeof top === 'object') {
+        topId = undoEntryIds.get(top);
+        if (topId === undefined) {
+          topId = nextUndoEntryId++;
+          undoEntryIds.set(top, topId);
+        }
+      }
+    }
+    return { cur, ...(topId !== undefined ? { topId } : {}) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Short undo-history string for the change signature (so a hand undo/redo re-sends a snapshot). */
+export function undoSignature(m: Any): string {
+  const pos = readUndoPos(m);
+  return pos ? `u${pos.cur}:${pos.topId ?? ''}` : 'u?';
 }
 
 const SPLIT_KEY = /^B_([^_]*)_(.*)$/;
@@ -919,11 +963,195 @@ async function paintAndVerify(step: PaintStepRequest, m: Any, bm: Any, bmStamp: 
   if (readBlockMappingStamp(m) !== bmStamp) details.push("DRA's precinct data changed during the paint.");
   if (!changedSomething && !threw) details.push('Nothing changed in DRA.');
 
-  if (!details.length) return { status: 'painted', stepId: step.stepId, blocksMoved: moved, featuresChanged: changedKeys.length, ms: Math.round(performance.now() - t0) };
+  const posNow = readUndoPos(m);
+  if (!details.length) {
+    return {
+      status: 'painted',
+      stepId: step.stepId,
+      blocksMoved: moved,
+      featuresChanged: changedKeys.length,
+      ms: Math.round(performance.now() - t0),
+      undoBefore,
+      undoPos: undoNow,
+      ...(posNow?.topId !== undefined ? { undoTopId: posNow.topId } : {}),
+    };
+  }
   const summary = !changedSomething
     ? threw
       ? "DRA's paint function failed and nothing changed in DRA."
       : 'DRA did not apply the edit: nothing changed.'
     : `DRA's edit differs from the step: ${[notMoved.length ? `${notMoved.length} of ${want.size} blocks did not move` : '', wrong.length ? `${wrong.length} went to another district` : '', otherCount ? `${otherCount} block(s) outside the step changed` : '', unknownKeys.length ? `${unknownKeys.length} unreadable feature(s) changed` : ''].filter(Boolean).join(', ') || 'see the details'}.`;
   return { status: 'mismatch', stepId: step.stepId, summary, details, changedSomething, undoRecorded };
+}
+
+/** Guards before calling model.actionUndo() for a step painted by the extension. Reads only. */
+export function undoPaintRefusal(req: UndoPaintRequest, m: Any = getModel()): { reason: string; stale?: boolean } | null {
+  const avail = paintAvailability(m);
+  if (!avail.ok) return { reason: avail.reason ?? 'Undo is not available on this map.' };
+  const pos = readUndoPos(m);
+  if (!pos || pos.cur !== req.expectedUndoPos || pos.cur <= 0) {
+    return { reason: "DRA's undo history has moved since that step was painted, so the panel will not undo it.", stale: true };
+  }
+  if (req.expectedUndoTopId !== undefined && pos.topId !== undefined && pos.topId !== req.expectedUndoTopId) {
+    return { reason: "DRA's undo history changed since that step was painted, so the panel will not undo it.", stale: true };
+  }
+  const pending = uncommitted(m);
+  if (pending.length) {
+    return { reason: `DRA has uncommitted block edits (precinct ${pending.slice(0, 3).join(', ')}${pending.length > 3 ? ', …' : ''}), so the panel will not undo.`, stale: true };
+  }
+  if (m.dataComplete === false) return { reason: 'DRA is still loading this map’s data. Try again in a moment.' };
+  const bm = blockMappingObj(m);
+  if (!req.blocks.length) return { reason: 'The step has no blocks.', stale: true };
+  const rev: string[] | undefined = bm.rev(req.precinctId);
+  if (!rev?.length) return { reason: `DRA has no precinct ${req.precinctId} in its precinct data.`, stale: true };
+  for (const g of req.blocks) {
+    const p = bm.map(g);
+    if (p !== req.precinctId) return { reason: `Block ${g} is no longer in precinct ${req.precinctId}.`, stale: true };
+  }
+  const fbm = m.fullBlockMap();
+  const { blocks: now, unreadable } = decodePrecinct(fbm, req.precinctId, bm);
+  if (unreadable.length) return { reason: `Precinct ${req.precinctId} is split in an unreadable DRA format (${unreadable[0]}).`, stale: true };
+  for (const g of req.blocks) {
+    const d = now.get(g) ?? 0;
+    if (d !== req.to) return { reason: `Block ${g} is now in ${districtLabel(m, d)}, not ${districtLabel(m, req.to)} as expected after painting.`, stale: true };
+  }
+  return null;
+}
+
+/**
+ * Undo one step previously painted by the extension through DRA's own model.actionUndo(),
+ * only while that paint is still the latest entry in DRA's undo history, then verify every block
+ * returned to its original district and nothing else changed.
+ */
+export async function undoPaint(req: UndoPaintRequest): Promise<UndoPaintResult> {
+  const t0 = performance.now();
+  let m: Any;
+  let bm: Any;
+  let bmStamp: string;
+  let before: Record<string, number>;
+  let undoBefore: number;
+  try {
+    m = getModel();
+    const refusal = undoPaintRefusal(req, m);
+    if (refusal) return { status: 'refused', stepId: req.stepId, reason: refusal.reason, ...(refusal.stale ? { stale: true } : {}) };
+    bm = blockMappingObj(m);
+    bmStamp = readBlockMappingStamp(m);
+    before = readFeatureMap(m);
+    undoBefore = Number(m.undoredo.cur);
+  } catch (e) {
+    return { status: 'refused', stepId: req.stepId, reason: `Could not check the map before undoing (${e instanceof Error ? e.message : String(e)}).` };
+  }
+  try {
+    return await undoAndVerify(req, m, bm, bmStamp, before, undoBefore, t0);
+  } catch (e) {
+    return {
+      status: 'mismatch',
+      stepId: req.stepId,
+      summary: 'The extension could not re-read the plan after undoing, so it cannot tell what changed.',
+      details: [`Error: ${e instanceof Error ? e.message : String(e)}`],
+      changedSomething: true,
+    };
+  }
+}
+
+async function undoAndVerify(req: UndoPaintRequest, m: Any, bm: Any, bmStamp: string, before: Record<string, number>, undoBefore: number, t0: number): Promise<UndoPaintResult> {
+  const details: string[] = [];
+  let threw = false;
+  try {
+    m.actionUndo();
+  } catch (e) {
+    threw = true;
+    details.push(`DRA raised an error while undoing: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  const scale = paintWaitScale();
+  const want = new Set(req.blocks);
+  const stepRestored = () => {
+    const { blocks } = decodePrecinct(m.fullBlockMap(), req.precinctId, bm);
+    for (const g of want) if (blocks.get(g) !== req.from) return false;
+    return true;
+  };
+  for (let waited = 0; !threw && waited < 5000 * scale && !stepRestored(); waited += 100) await sleep(100);
+  let after = readFeatureMap(m);
+  for (let settled = 0, waited = 0; waited < 3000 * scale && settled < 2; waited += 250) {
+    await sleep(250 * scale);
+    const next = readFeatureMap(m);
+    settled = sameMap(next, after) ? settled + 1 : 0;
+    after = next;
+  }
+
+  const changedKeys: string[] = [];
+  for (const k in before) if (after[k] !== before[k]) changedKeys.push(k);
+  for (const k in after) if (!(k in before)) changedKeys.push(k);
+  const touched = new Set<string>([req.precinctId]);
+  const unknownKeys: string[] = [];
+  for (const k of changedKeys) {
+    const p = precinctOfKey(k, bm);
+    if (p && bm.rev(p)) touched.add(p);
+    else unknownKeys.push(k);
+  }
+  const notRestored: string[] = [];
+  const wrong: string[] = [];
+  const others: string[] = [];
+  let restored = 0;
+  let otherCount = 0;
+  const MAX_PRECINCTS = 200;
+  let pi = 0;
+  for (const p of touched) {
+    if (++pi > MAX_PRECINCTS) {
+      others.push(`…and features in ${touched.size - MAX_PRECINCTS} more precincts changed`);
+      break;
+    }
+    const b0 = decodePrecinct(before, p, bm);
+    const b1 = decodePrecinct(after, p, bm);
+    for (const k of b1.unreadable) if (!b0.unreadable.includes(k)) unknownKeys.push(k);
+    for (const [g, d1] of b1.blocks) {
+      const d0 = b0.blocks.get(g) ?? 0;
+      if (want.has(g)) {
+        if (d1 === req.from) restored++;
+        else if (d1 === d0) notRestored.push(g);
+        else wrong.push(`Block ${g} went to ${districtLabel(m, d1)} instead of ${districtLabel(m, req.from)}.`);
+      } else if (d1 !== d0) {
+        otherCount++;
+        if (others.length < 6) others.push(`Block ${g} (precinct ${p}) changed from ${districtLabel(m, d0)} to ${districtLabel(m, d1)}, but it is not part of this step.`);
+      }
+    }
+  }
+  const posAfter = readUndoPos(m);
+  const undoNow = posAfter?.cur ?? Number(m.undoredo?.cur);
+  const changedSomething = changedKeys.length > 0;
+  if (notRestored.length) details.push(`${notRestored.length} of the step's ${want.size} blocks did not return to ${districtLabel(m, req.from)} (e.g. ${notRestored.slice(0, 3).join(', ')}).`);
+  details.push(...wrong.slice(0, 6));
+  if (otherCount) details.push(...others, ...(otherCount > others.length ? [`${otherCount} blocks outside the step changed in all.`] : []));
+  if (unknownKeys.length) details.push(`${unknownKeys.length} map feature(s) changed that the extension cannot read as blocks (e.g. ${unknownKeys[0]}).`);
+  const pendingAfter = uncommitted(m);
+  if (pendingAfter.length) details.push(`DRA now shows uncommitted edits in precinct ${pendingAfter.slice(0, 3).join(', ')}.`);
+  if (changedSomething && undoNow !== undoBefore - 1) details.push(`DRA's undo history moved by ${undoNow - undoBefore} step(s), expected -1.`);
+  if (readBlockMappingStamp(m) !== bmStamp) details.push("DRA's precinct data changed during undo.");
+  if (!changedSomething && !threw) details.push('Nothing changed in DRA.');
+
+  if (!details.length) {
+    return {
+      status: 'undone',
+      stepId: req.stepId,
+      blocksRestored: restored,
+      featuresChanged: changedKeys.length,
+      ms: Math.round(performance.now() - t0),
+      undoPos: undoNow,
+      ...(posAfter?.topId !== undefined ? { undoTopId: posAfter.topId } : {}),
+    };
+  }
+  const summary = !changedSomething
+    ? threw
+      ? "DRA's undo function failed and nothing changed in DRA."
+      : 'DRA did not undo the edit: nothing changed.'
+    : `DRA's undo differs from restoring the step: ${[notRestored.length ? `${notRestored.length} of ${want.size} blocks did not return` : '', wrong.length ? `${wrong.length} went to another district` : '', otherCount ? `${otherCount} block(s) outside the step changed` : '', unknownKeys.length ? `${unknownKeys.length} unreadable feature(s) changed` : ''].filter(Boolean).join(', ') || 'see the details'}.`;
+  return {
+    status: 'mismatch',
+    stepId: req.stepId,
+    summary,
+    details,
+    changedSomething,
+    ...(posAfter ? { undoPos: posAfter.cur, ...(posAfter.topId !== undefined ? { undoTopId: posAfter.topId } : {}) } : {}),
+  };
 }

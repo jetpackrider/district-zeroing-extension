@@ -107,7 +107,7 @@ export function CsvDropZone({
             <>
               {' '}
               <span
-                className="zd-dropzone__file zd-mono"
+                className="zd-pill zd-pill--accent zd-mono zd-dropzone__file"
                 title={fileName}
                 data-testid="csv-source-name"
               >
@@ -118,7 +118,7 @@ export function CsvDropZone({
         </p>
         <p className="zd-dropzone__hint">{hint}</p>
         {error && (
-          <p className="zd-dropzone__error" role="alert">
+          <p className="zd-note zd-note--error zd-dropzone__error" role="alert">
             {error}
           </p>
         )}

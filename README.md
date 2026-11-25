@@ -47,6 +47,14 @@ Getting the last few people out of a district means hunting along its border for
 | **One&nbsp;district** | Ranked ways to bring it to zero by trading with its neighbors. You can choose which neighbor gives or takes. |
 | **Group** | A plan that zeroes the districts you tick, among themselves or with outside neighbors absorbing the difference. |
 | **Whole&nbsp;map** | A plan for every unlocked district at once, border by border. |
+| **County&nbsp;clusters** | For a number of districts and a tolerance, splits the state into groups of whole counties that can each be districted within that tolerance, the way North Carolina's legislative maps are drawn. Hover a result to see it on the map, or use one cluster as the swap area. |
+
+A few controls change what an option is allowed to do:
+
+- **Swap area.** Draw a shape, use the current map view, or pick a county, town or cluster. *Prefer* ranks moves inside it first; *Only* allows nothing outside it.
+- **Goal.** Aim a district at one person under or over the target instead of exactly on it.
+- **Trade with Unassigned.** On a map still being drawn, a district can take people from unassigned blocks or give them back.
+- **Undo.** Takes back the last paint step or setting change.
 
 Pick an option and the walkthrough takes over. Each step is one precinct: shatter it, paint the numbered blocks, commit. The panel watches the map and ticks blocks off as they land, notices edits that aren't part of the plan, and can re-plan from wherever you are. At the end it re-reads DRA's own numbers and confirms every district.
 
@@ -124,7 +132,7 @@ That writes a self-contained extension to `apps/extension/local/chrome-mv3` with
 
 This is a working pre-release, and it helps to know exactly how far it has been tested.
 
-- **Tested by machine:** about 200 unit tests and 69 browser tests. The browser tests drive the real extension against a stand-in for the DRA page, including New York's enacted congressional plan on the real New York data.
+- **Tested by machine:** about 450 unit tests and 117 browser tests. The browser tests drive the real extension against a stand-in for the DRA page, including New York's enacted congressional plan on the real New York data.
 - **Data:** bundles for all 50 states and DC build and pass validation against DRA's published populations and precinct graph.
 - **On the live site:** used by hand on New York maps, paint button included. Other states have only been through the automated tests.
 - **Supported maps:** 2020 census shapes, single-member districts, equal population, whole-state maps. Anything else gets a clear message and no suggestions.

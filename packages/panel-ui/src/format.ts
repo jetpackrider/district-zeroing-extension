@@ -35,6 +35,17 @@ export function isDeviationZeroed(deviation: number, map?: MapInfo): boolean {
   return deviation === 0;
 }
 
+/** True when a district sits at its goal: exact deviation if `goal` is set, else the zero rule. */
+export function isAtGoal(deviation: number, goal: -1 | 0 | 1 | undefined, map?: MapInfo): boolean {
+  if (goal !== undefined) return deviation === goal;
+  return isDeviationZeroed(deviation, map);
+}
+
+/** Signed people a district must give (+) or take (−) to reach its goal (default 0). */
+export function deltaToGoal(deviation: number, goal?: -1 | 0 | 1): number {
+  return deviation - (goal ?? 0);
+}
+
 export type DeviationTone = 'zero' | 'over' | 'under';
 
 export function getDeviationTone(deviation: number, map?: MapInfo): DeviationTone {
@@ -204,14 +215,20 @@ export interface NeighborChoiceRow {
  * The neighbors one district can trade with, with what each would become if it took (over
  * district) or gave (under district) the whole difference. Most helped first.
  */
-export function neighborChoiceRows(district: DistrictRow, districts: DistrictRow[], map?: MapInfo): NeighborChoiceRow[] {
+export function neighborChoiceRows(
+  district: DistrictRow,
+  districts: DistrictRow[],
+  map?: MapInfo,
+  goal?: -1 | 0 | 1,
+): NeighborChoiceRow[] {
+  const delta = deltaToGoal(district.deviation, goal);
   const rows: NeighborChoiceRow[] = [];
   for (const idx of district.neighbors ?? []) {
     const n = districts.find((d) => d.index === idx);
     if (!n || idx === district.index) continue;
-    // Over: the district gives `deviation` people, the neighbor gains them. Under: the neighbor
-    // gives |deviation| people. Either way the neighbor ends at its deviation plus the district's.
-    const after = n.deviation + district.deviation;
+    // Over (delta > 0): the district gives `delta` people, the neighbor gains them. Under
+    // (delta < 0): the neighbor gives |delta| people. Either way the neighbor ends at its deviation + delta.
+    const after = n.deviation + delta;
     rows.push({
       index: idx,
       before: n.deviation,
@@ -255,11 +272,15 @@ export interface UnassignedChoice {
  * The Unassigned choice for one district, when the district touches unassigned blocks. It has no
  * deviation and no target, so it is never "further from zero" and never locked.
  */
-export function unassignedChoice(district: DistrictRow, state: Pick<PanelState, 'unassigned'>): UnassignedChoice | undefined {
+export function unassignedChoice(
+  district: DistrictRow,
+  state: Pick<PanelState, 'unassigned'>,
+  goal?: -1 | 0 | 1,
+): UnassignedChoice | undefined {
   if (!district.neighbors?.includes(UNASSIGNED)) return undefined;
   const before = Math.max(0, state.unassigned?.pop ?? 0);
-  // Over: the district gives `deviation` people to Unassigned. Under: Unassigned gives |deviation|.
-  const raw = before + district.deviation;
+  // Over (delta > 0): the district gives `delta` people to Unassigned. Under: Unassigned gives |delta|.
+  const raw = before + deltaToGoal(district.deviation, goal);
   return { before, after: Math.max(0, raw), inDefault: before > 0, short: raw < 0 };
 }
 
@@ -283,9 +304,74 @@ export function unassignedNet(card: Pick<SolutionCard, 'borderFlows'>): { net: n
  * Which way people move, in words: "District 7 gives 34 people to" / "District 3 takes 12 people
  * from". The caller appends the neighbors (or "…").
  */
-export function tradeDirectionPhrase(district: DistrictRow, districts: DistrictRow[]): string {
+export function tradeDirectionPhrase(district: DistrictRow, districts: DistrictRow[], goal?: -1 | 0 | 1): string {
   const name = formatDistrictName(district.index, districts);
-  return district.deviation > 0
-    ? `${name} gives ${formatPeople(district.deviation)} to`
-    : `${name} takes ${formatPeople(district.deviation)} from`;
+  const delta = deltaToGoal(district.deviation, goal);
+  return delta > 0
+    ? `${name} gives ${formatPeople(delta)} to`
+    : `${name} takes ${formatPeople(delta)} from`;
+}
+
+export function formatBlocks(count: number): string {
+  const n = Math.abs(Math.round(count));
+  return `${n.toLocaleString('en-US')} ${n === 1 ? 'block' : 'blocks'}`;
+}
+
+/**
+ * The selected area, once drawn on the map or chosen as a region or a county cluster.
+ */
+export function hasSelectedArea(area: PanelState['area']): area is NonNullable<PanelState['area']> {
+  return Boolean(area?.region || area?.cluster || (area?.ring && area.ring.length >= 3));
+}
+
+/**
+ * The controller explains a solve that found nothing because of the area in its message. The
+ * panel words the callout around that only when an area is set and the message is about it, so a
+ * message about something else keeps its own heading.
+ */
+export function isAreaFailure(state: Pick<PanelState, 'area' | 'solve' | 'solutions'>): boolean {
+  const { solve } = state;
+  if (!hasSelectedArea(state.area) || state.solutions.length > 0 || !solve.message) return false;
+  if (solve.status === 'idle' || solve.status === 'loading-data' || solve.status === 'solving') return false;
+  return /\barea\b/i.test(solve.message);
+}
+
+/** Tolerance choices for county clusters (fractions), and the default (±5%). */
+export const CLUSTER_TOLERANCES = [0.005, 0.01, 0.02, 0.05, 0.1] as const;
+export const DEFAULT_CLUSTER_TOLERANCE = 0.05;
+
+/** A tolerance fraction as "±5%" / "±0.5%". */
+export function formatTolerance(fraction: number): string {
+  return `±${Number((fraction * 100).toFixed(2))}%`;
+}
+
+/** A signed fraction as a percentage with one decimal: "+1.2%", "−0.4%", "0.0%". */
+export function formatSignedPct(fraction: number, digits = 1): string {
+  const text = Math.abs(fraction * 100).toFixed(digits);
+  if (Number(text) === 0) return `${(0).toFixed(digits)}%`;
+  return `${fraction > 0 ? '+' : MINUS}${text}%`;
+}
+
+/** Elapsed time in whole seconds once it is a second or more ("10 s"); milliseconds below that. */
+export function formatSeconds(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 1000) return formatElapsed(ms);
+  return ms < 10000 ? `${Number((ms / 1000).toFixed(1))} s` : `${Math.round(ms / 1000)} s`;
+}
+
+/** "Option 1: 34 clusters · worst ±4.2% · exhaustive" (or "· best found in 10 s"). */
+export function formatClusteringTitle(
+  stats: { clusterCount: number; maxAbsDeviationPct: number },
+  index: number,
+  exhaustive: boolean,
+  elapsedMs?: number,
+): string {
+  const count = `${stats.clusterCount.toLocaleString('en-US')} ${stats.clusterCount === 1 ? 'cluster' : 'clusters'}`;
+  const how = exhaustive ? 'exhaustive' : `best found${elapsedMs !== undefined ? ` in ${formatSeconds(elapsedMs)}` : ''}`;
+  return `Option ${index + 1}: ${count} · worst ±${(stats.maxAbsDeviationPct * 100).toFixed(1)}% · ${how}`;
+}
+
+/** The first few county names and how many more there are ("+12 more"). */
+export function truncateNames(names: string[], shown = 3): { text: string; more: number } {
+  const head = names.length > shown + 1 ? names.slice(0, shown) : names;
+  return { text: head.join(', '), more: names.length - head.length };
 }

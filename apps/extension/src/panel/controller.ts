@@ -6,6 +6,8 @@ import {
   computeTargets,
   isZeroed,
   UNASSIGNED,
+  type AreaPreference,
+  type AreaState,
   type BundleSource,
   type EngineGraph,
   type GroupFeasibility,
@@ -21,19 +23,39 @@ import {
   type StateBundle,
   type WalkthroughState,
 } from '@zd/contracts';
-import { createBundleSource, geoidIndex, toEngineGraph } from '../adapters/bundle';
+import { createBundleSource, geoidIndex, toEngineGraph, type AppBundleSource, type CountyOutlines } from '../adapters/bundle';
+import { areaCluster, clusterColors, clusterFeatures, clusterMask, clusterRequest, clusterUnavailable, countyAdjacency, countyNames, withCountyNames } from './clusters';
 import type { PanelHost } from '../shared/panel-host';
-import { HOOK_VERSION, type BBox, type HighlightFC, type HookBlockMapping, type HookSnapshot, type HookToPanel, type HighlightStatus, type PaintResult, type SelfCheck } from '../shared/protocol';
+import { areaSolveMessage, cleanRing, splitAreaSentences, countInside, insideMask, listRegions, nearestBlock, regionName, type AreaMode, type AreaRegion, type AreaSelection, type Ring, type SavedArea } from './area';
+import { HOOK_VERSION, type AreaRing, type BBox, type ClusterFC, type HighlightFC, type HookBlockMapping, type HookSnapshot, type HookToPanel, type HighlightStatus, type PaintResult, type PaintStepRequest, type SelfCheck, type UndoPaintResult } from '../shared/protocol';
+import {
+  activeUndoEntry,
+  afterPaintUndone,
+  clearPaintUndo,
+  clearSettingUndo,
+  cloneSavedArea,
+  currentUndo,
+  emptyUndo,
+  lockUndoLabel,
+  paintUndoLabel,
+  reconcileDraSnapshot,
+  recordPaintUndo,
+  recordSettingUndo,
+  type PaintUndoEntry,
+  type SettingUndoEntry,
+  type UndoContext,
+  type UndoTrackerState,
+} from './undo';
 import { buildLiveMapping, districtPops, featureMapToAssignment, unassignedOf, type LiveMapping } from './assignment';
 import { labelIndexes, parseBlockCsv, stateFromGeoid } from './csv';
 import { CancelledError, EngineClient } from './engine-client';
-import { GeometryCache, type HighlightItem, type HighlightSink } from './highlights';
+import { GeometryCache, type AreaSink, type ClusterSink, type HighlightItem, type HighlightSink } from './highlights';
 import { detectUnsupported } from './scope';
 import { TabLink, type LinkStatus } from './tab-link';
 import { allStepsDone, applyTargets, buildSteps, deviationChanges, tickWalkthrough, type WalkPlan } from './walkthrough';
 import { buildDiagnostics, type DiagnosticsInput } from './diagnostics';
 import type { WorkerResponse } from '../worker/protocol';
-import { joinDistrictNames, oneDistrictTrade, sanitizeScope, solveDistrictMessage, withoutLocked } from '../worker/choice';
+import { formatGoal, joinDistrictNames, oneDistrictTrade, sanitizeScope, solveDistrictMessage, withoutLocked } from '../worker/choice';
 
 type Source = 'live' | 'csv';
 
@@ -48,7 +70,17 @@ export interface ControllerOptions {
    * last as long as the panel is open.
    */
   locks?: { saved: Record<string, number[]>; save: (all: Record<string, number[]>) => void };
+  /**
+   * Remembered areas (PanelState.area), per map under the same key as the locks, and how to save
+   * them. Without it an area lasts as long as the panel is open.
+   */
+  areas?: { saved: Record<string, SavedArea>; save: (all: Record<string, SavedArea>) => void };
 }
+
+/** How long the panel waits for DRA's map to say what is in view ("Use map view"). */
+const VIEW_TIMEOUT_MS = 3000;
+/** The self-check item for what area drawing needs from DRA's map (src/dra/hooks.ts). */
+const AREA_DRAW_HOOK = 'map.unproject() (area drawing)';
 
 /** How long the panel waits for the hook to report a paint (the hook itself gives up after ~8 s). */
 const PAINT_TIMEOUT_MS = 30_000;
@@ -65,7 +97,7 @@ export class ExtensionController implements PanelController {
   private state: PanelState = INITIAL;
   private listeners = new Set<() => void>();
   readonly link: TabLink;
-  private bundleSource: BundleSource;
+  private bundleSource: AppBundleSource;
   private engine: EngineClient | null = null;
   private engineGraphFor = '';
 
@@ -101,6 +133,47 @@ export class ExtensionController implements PanelController {
   /** Test builds only: make the worker busy before each solve (cancel tests). */
   private testSolveDelayMs = 0;
 
+  // The area where the user would like the swap to happen (PanelState.area)
+  /** Areas per map, keyed by `lockKey`. The current map's is mirrored in state.area. */
+  private areas: Record<string, SavedArea> = {};
+  /** True from 'area-draw' until the hook reports an outline or the drawing is stopped. */
+  private areaDrawing = false;
+  private areaPick: { kind: AreaRegion['kind']; reqId: number } | undefined;
+  private bundleRegions: PanelState['regions'];
+  /** The mode chosen while there is no area yet (used for the next one). */
+  private areaPendingMode: AreaMode = 'prefer';
+  /**
+   * Which blocks the current area holds (AreaPreference.inside), built once per area and bundle,
+   * plus the people in them for the population column last asked for.
+   */
+  private areaMaskCache: { bundle: StateBundle; key: string; inside: Uint8Array; blocks: number; peopleField: PopField | null; people: number } | null = null;
+  /** The ring last sent to DRA's map and the mini-map (JSON; '' = none; null = send again). */
+  private areaShown: string | null = null;
+  private miniArea: AreaSink | null = null;
+  /**
+   * The block points (StateBundle.points) are read only once an area needs them (see
+   * adapters/bundle.ts): the read in progress for the loaded bundle, and why it failed, if it did.
+   */
+  private pointsLoad: { bundle: StateBundle; promise: Promise<Int32Array | undefined> } | null = null;
+  private pointsError: { bundle: StateBundle; message: string } | null = null;
+  /** The notice put up when "Re-plan from here" found nothing (taken down by the next one that works). */
+  private replanNotice: string | null = null;
+  // County clusters (PanelState.clusters): the search in flight, the outlines drawn on hover.
+  private clustersSeq = 0;
+  private clusterHoverSeq = 0;
+  /** Why the outlines cannot be drawn (no outlines in the data, or they failed to load), for the clusters' message. */
+  private clustersNote: string | undefined;
+  /** The message the search came back with (PanelState.clusters.message is it plus clustersNote). */
+  private clustersResultMessage: string | undefined;
+  /** The county outlines read for a state; `failed` is the note to show while they are missing. */
+  private outlinesLoad: { bundle: StateBundle; promise: Promise<CountyOutlines | undefined>; failed?: string } | null = null;
+  private countyAdj: { graph: EngineGraph; adj: number[][] } | null = null;
+  /** The cluster picture on the maps (null = none), kept to put back after a reconnect or on the mini-map. */
+  private clusterShown: ClusterFC | null = null;
+  private miniClusters: ClusterSink | null = null;
+  private viewWaiters = new Map<number, (ring: AreaRing | null) => void>();
+  private viewSeq = 0;
+
   // Painting a step for the user (opt-in; see src/dra/hooks.ts paintStep)
   /** The user's remembered choice. What the panel shows is this AND available. */
   private autoPaintPref = false;
@@ -110,9 +183,15 @@ export class ExtensionController implements PanelController {
   /** Why the last paint of a step was refused (shown with that step only). */
   private paintNote: { stepId: string; text: string } | null = null;
   private paintSeq = 0;
-  private paintWaiter: { reqId: number; stepId: string; stepIndex: number; timer: ReturnType<typeof setTimeout> } | null = null;
+  private paintWaiter: { reqId: number; stepId: string; stepIndex: number; step: PaintStepRequest; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Last paint outcome, for the diagnostics. */
   private lastPaint: string | null = null;
+
+  // Panel Undo (PanelState.undo): consecutive extension paints in DRA, or latest destructive setting change.
+  private undoState: UndoTrackerState = emptyUndo();
+  private undoBusy = false;
+  private undoSeq = 0;
+  private undoWaiter: { reqId: number; entry: PaintUndoEntry; timer: ReturnType<typeof setTimeout> } | null = null;
 
   // Map sinks
   private hookSink: HighlightSink;
@@ -158,6 +237,12 @@ export class ExtensionController implements PanelController {
     lastStepMs: 0,
     tableReadyAt: 0,
     bundleMs: 0,
+    /** Building the area's inside mask (once per ring). */
+    areaMaskMs: 0,
+    /** Reading the block points (once per state, when an area first needs them). */
+    pointsMs: 0,
+    /** Reading the county outlines (once per state, when clusters are first drawn). */
+    outlinesMs: 0,
     startedAt: performance.now(),
   };
 
@@ -165,6 +250,7 @@ export class ExtensionController implements PanelController {
     this.bundleSource = createBundleSource(opts.dataBaseUrl);
     this.autoPaintPref = opts.autoPaint?.enabled === true;
     this.locks = { ...(opts.locks?.saved ?? {}) };
+    this.areas = { ...(opts.areas?.saved ?? {}) };
     this.link = new TabLink(opts.host, opts.tabId, (m) => this.onHookMessage(m), (s) => this.onLinkStatus(s));
     this.hookSink = {
       show: (fc, fit) => this.link.send({ t: 'highlight', fc, fit }),
@@ -198,8 +284,44 @@ export class ExtensionController implements PanelController {
       case 'set-district-lock':
         this.setDistrictLock(action.districts, action.locked);
         break;
+      case 'area-draw':
+        this.areaDraw();
+        break;
+      case 'area-cancel-draw':
+        this.areaCancelDraw();
+        break;
+      case 'area-use-view':
+        void this.areaUseView();
+        break;
+      case 'area-use-region':
+        this.areaUseRegion(action.kind, action.index);
+        break;
+      case 'area-pick-region':
+        this.areaPickRegion(action.kind);
+        break;
+      case 'area-clear':
+        this.areaClear();
+        break;
+      case 'undo':
+        this.undo();
+        break;
+      case 'set-area-mode':
+        this.setAreaMode(action.mode);
+        break;
+      case 'clusters-find':
+        this.clustersFind(action.numDistricts, action.tolerance);
+        break;
+      case 'clusters-cancel':
+        void this.clustersCancel();
+        break;
+      case 'clusters-hover':
+        void this.clustersHover(action.id, action.cluster);
+        break;
+      case 'clusters-use-as-area':
+        this.clustersUseAsArea(action.id, action.cluster);
+        break;
       case 'solve':
-        if (this.paintBusy) break; // never solve under a paint in flight
+        if (this.paintBusy || this.undoBusy) break; // never solve under a paint or undo in flight
         void this.solve();
         break;
       case 'cancel-solve':
@@ -227,7 +349,7 @@ export class ExtensionController implements PanelController {
         void this.showCurrentStep(true);
         break;
       case 'walkthrough-replan':
-        if (this.paintBusy) break; // never re-plan under a paint in flight
+        if (this.paintBusy || this.undoBusy) break; // never re-plan under a paint or undo in flight
         void this.replan();
         break;
       case 'set-auto-paint':
@@ -261,7 +383,23 @@ export class ExtensionController implements PanelController {
     // Locks belong to the map: a different map shows its own.
     const locks = next.map ? (this.locks[lockKey(next.map)] ?? []).filter((d) => d >= 1 && d <= next.map!.numDistricts) : [];
     if (JSON.stringify(locks) !== JSON.stringify(next.lockedDistricts ?? [])) next.lockedDistricts = locks;
+    // Drawing stops by itself when it can no longer go on: a walkthrough started, the panel went to
+    // CSV mode, the data has no block points, DRA's map went out of reach. Otherwise the page
+    // would keep taking clicks for an outline the panel can no longer use.
+    if ((this.areaDrawing || this.areaPick) && (next.walkthrough || this.areaUnavailable(next, 'draw'))) {
+      this.areaDrawing = false;
+      this.areaPick = undefined;
+      this.link?.send({ t: 'area-draw-cancel' });
+    }
+    next.regions = next.connection === 'live' && this.bundle && next.map?.state === this.bundle.manifest.state ? this.bundleRegions : undefined;
+    // So does the area, with what is inside it and why it can't be used, when it can't.
+    const area = this.areaState(next);
+    if (JSON.stringify(area) !== JSON.stringify(next.area)) next.area = area;
+    // The panel's single Undo (latest extension paint still at the top of DRA's undo stack, or latest destructive setting).
+    const undo = currentUndo(this.undoState, this.undoContext(next));
+    if (JSON.stringify(undo) !== JSON.stringify(next.undo)) next.undo = undo;
     this.state = next;
+    this.syncAreaOutline();
     for (const l of this.diagListeners) {
       try {
         l();
@@ -283,6 +421,13 @@ export class ExtensionController implements PanelController {
   // ---------------------------------------------------------------------------
 
   private onLinkStatus(s: LinkStatus) {
+    // A (re)connected page may have lost the area outline (reload): send it again. A page that
+    // went away took any drawing with it.
+    if (s.kind === 'connected') this.areaShown = null;
+    else {
+      this.areaDrawing = false;
+      this.areaPick = undefined;
+    }
     if (this.source === 'csv') {
       if (s.kind !== 'connected') this.check = null;
       this.set({}); // map mode may change
@@ -291,6 +436,7 @@ export class ExtensionController implements PanelController {
     if (s.kind === 'no-tab') {
       this.check = null;
       this.snap = null;
+      this.undoState = emptyUndo();
       this.set({ connection: 'no-tab', notice: { level: 'info', text: 'Open a map on davesredistricting.org in this window, or drop a DRA block-assignment CSV here.' } });
     } else if (s.kind === 'connecting' && (this.state.connection === 'no-tab' || this.state.connection === 'no-plan')) {
       this.set({ connection: 'connecting', notice: undefined });
@@ -301,6 +447,7 @@ export class ExtensionController implements PanelController {
       // The page takes highlights off when its panel disconnects; after a reconnect to the same
       // page, put back what was showing.
       if (s.kind === 'connected' && this.lastHighlight && this.mapMode() === 'dra') this.hookSink.show(this.lastHighlight.fc);
+      if (s.kind === 'connected' && this.clusterShown) this.link.send({ t: 'clusters-show', fc: this.clusterShown });
     }
   }
 
@@ -352,6 +499,28 @@ export class ExtensionController implements PanelController {
       case 'paint-result':
         this.onPaintResult(m.reqId, m.result);
         break;
+      case 'undo-result':
+        this.onUndoResult(m.reqId, m.result);
+        break;
+      case 'area-drawn':
+        this.onAreaDrawn(m.ring);
+        break;
+      case 'area-picked':
+        void this.onAreaPicked(m);
+        break;
+      case 'area-draw-ended':
+        if (!this.areaDrawing) break;
+        this.areaDrawing = false;
+        this.set(m.reason === 'unavailable' ? { notice: { level: 'warn', text: `Drawing an area could not start: ${m.detail ?? "DRA's map is not ready."} "Use map view" may still work.` } } : {});
+        break;
+      case 'view': {
+        const w = this.viewWaiters.get(m.reqId);
+        if (w) {
+          this.viewWaiters.delete(m.reqId);
+          w(m.ring);
+        }
+        break;
+      }
       case 'error':
         console.warn('[zd] hook error', m.message);
         this.hookError = m.message;
@@ -391,7 +560,9 @@ export class ExtensionController implements PanelController {
   private enterNoPlan() {
     if (this.state.connection === 'no-plan') return;
     if (this.state.walkthrough) this.endWalkthrough();
+    this.areaCancelDraw();
     this.snap = null;
+    this.undoState = emptyUndo();
     this.resetDerived();
     this.solveSeq++;
     this.set({
@@ -470,10 +641,20 @@ export class ExtensionController implements PanelController {
     // Plan changed under us (another map opened): drop everything derived.
     if (prev && (prev.info.state !== info.state || prev.info.nDistricts !== info.nDistricts || prev.sig.split('|')[0] !== snap.sig.split('|')[0])) {
       const keep = [this.features, this.featureSeq] as const;
+      this.areaCancelDraw(); // the outline would land on the other map
+      this.undoState = emptyUndo();
       this.resetDerived();
       [this.features, this.featureSeq] = keep;
       patch.solutions = [];
       patch.walkthrough = undefined;
+    } else if (!this.paintBusy && !this.undoBusy) {
+      // Withdraw paint undo immediately if DRA's undo position moved or the user shattered a precinct by hand.
+      this.undoState = reconcileDraSnapshot(this.undoState, {
+        seq: snap.seq,
+        undoPos: snap.undoPos,
+        undoTopId: snap.undoTopId,
+        pendingShatter: snap.pendingShatter,
+      });
     }
     this.set(patch);
     void this.ensureData(info.state, info.popField);
@@ -507,7 +688,9 @@ export class ExtensionController implements PanelController {
     if (this.bundleLoading && this.bundleState === state) return this.bundleLoading;
     this.bundleState = state;
     this.bundle = null;
-    this.set({ solve: { status: 'loading-data', progress: 0, message: `Loading ${state} data…` } });
+    // County clusters belong to the state they were found for.
+    this.dropClusters();
+    this.set({ solve: { status: 'loading-data', progress: 0, message: `Loading ${state} data…` }, clusters: undefined });
     const t0 = performance.now();
     this.bundleLoading = this.bundleSource.loadState(state, (loaded, total) => {
       if (total > 0) this.set({ solve: { status: 'loading-data', progress: loaded / total, message: `Loading ${state} data…` } });
@@ -517,6 +700,7 @@ export class ExtensionController implements PanelController {
       if (this.bundleState !== state) return b;
       this.perf.bundleMs = performance.now() - t0;
       this.bundle = b;
+      this.bundleRegions = listRegions(b);
       this.geo = new GeometryCache(this.bundleSource, b);
       this.set({ solve: { status: 'idle' } });
       this.recompute();
@@ -708,6 +892,7 @@ export class ExtensionController implements PanelController {
     if (this.source === 'csv') {
       if (this.state.walkthrough) this.endWalkthrough();
       this.source = 'live';
+      this.undoState = emptyUndo();
       this.resetDerived();
       this.snap = null;
       this.csvInfo = null;
@@ -757,7 +942,8 @@ export class ExtensionController implements PanelController {
   private setDistrictLock(districts: number[], lock: boolean) {
     const map = this.state.map;
     if (!map || this.state.walkthrough) return;
-    const next = new Set(this.state.lockedDistricts ?? []);
+    const prevLocks = this.state.lockedDistricts ?? [];
+    const next = new Set(prevLocks);
     for (const d of districts) {
       // 0 (Unassigned) is not a district and is never locked.
       if (!Number.isInteger(d) || d < 1 || d > map.numDistricts) continue;
@@ -765,7 +951,27 @@ export class ExtensionController implements PanelController {
       else next.delete(d);
     }
     const list = [...next].sort((a, b) => a - b);
-    if (JSON.stringify(list) === JSON.stringify(this.state.lockedDistricts ?? [])) return;
+    if (JSON.stringify(list) === JSON.stringify(prevLocks)) return;
+    const targets = this.targets ?? computeTargets(map.totalPop, map.numDistricts);
+    const prevSet = new Set(prevLocks);
+    const zeroedUnlocked = this.state.districts
+      .filter((d) => !prevSet.has(d.index) && isZeroed(d.pop, targets))
+      .map((d) => d.index);
+    const prevScope = this.state.scope;
+    const afterScope = withoutLocked(prevScope, list);
+    const label = lockUndoLabel({ locked: lock, prevLocks, nextLocks: list, zeroedUnlocked });
+    if (label) {
+      this.undoState = recordSettingUndo(this.undoState, {
+        kind: 'locks',
+        mapKey: this.areaKey(map),
+        prevLocks: prevLocks.slice(),
+        prevScope,
+        afterScope,
+        label,
+      });
+    } else {
+      this.undoState = clearSettingUndo(this.undoState, 'locks');
+    }
     const key = lockKey(map);
     if (list.length) this.locks[key] = list;
     else delete this.locks[key];
@@ -776,7 +982,7 @@ export class ExtensionController implements PanelController {
     this.highlightSeq++;
     this.clearMap();
     this.set({
-      scope: withoutLocked(this.state.scope, list),
+      scope: afterScope,
       solutions: [],
       hoveredSolutionId: undefined,
       feasibility: undefined,
@@ -784,6 +990,598 @@ export class ExtensionController implements PanelController {
       solve: this.state.solve.status === 'loading-data' ? this.state.solve : { status: 'idle' },
     });
     this.refreshInteraction();
+  }
+
+  // ---------------------------------------------------------------------------
+  // The area where the user would like the swap to happen (PanelState.area)
+  // ---------------------------------------------------------------------------
+
+  /** PanelState.area for `st`: the current map's area, the drawing flag, counts, and why it can't be used. */
+  private areaState(st: PanelState): AreaState | undefined {
+    const map = st.map;
+    if (!map) return undefined;
+    const saved = this.areas[this.areaKey(map)];
+    const drawing = this.areaDrawing;
+    const picking = this.areaPick?.kind;
+    const unavailable = this.regionUnavailable(saved?.region, map.state) ?? this.savedClusterUnavailable(saved?.cluster, map.state) ?? this.areaUnavailable(st, 'draw');
+    if (saved?.ring || drawing) void this.ensurePoints();
+    // No area and nothing to explain: absent (moves may happen anywhere).
+    if (!saved && !drawing && !picking && !unavailable) return undefined;
+    const a: AreaState = { mode: saved?.mode ?? this.areaPendingMode, drawing, ...(picking ? { picking } : {}) };
+    if (saved) {
+      if (saved.region) a.region = saved.region;
+      else if (saved.cluster) a.cluster = saved.cluster;
+      else a.ring = saved.ring;
+      const m = this.areaMask(saved, map.state);
+      if (m) {
+        a.blocks = m.blocks;
+        a.people = this.areaPeople(m);
+      }
+    }
+    if (unavailable) a.unavailable = unavailable;
+    return a;
+  }
+
+  /**
+   * Why an area cannot be used ('use': a solve, "Use map view") or drawn ('draw') right now;
+   * undefined when it can. Before the state's data is loaded nothing is known against it: the area
+   * can be marked, and its counts come with the data.
+   */
+  private areaUnavailable(st: PanelState, what: 'use' | 'draw'): string | undefined {
+    if (st.connection === 'csv') return 'An area needs the live DRA tab, so it is off in CSV mode.';
+    if (st.connection !== 'live') return 'An area can be marked on a live, supported DRA map only.';
+    const b = this.bundle;
+    if (b && st.map && b.manifest.state === st.map.state) {
+      // The manifest says whether the state's data has block points; they are read on demand.
+      if (!b.manifest.points) return "This state's data has no block locations for drawing an area or picking on the map.";
+      if (this.pointsError?.bundle === b) return `The block locations for this state could not be loaded (${this.pointsError.message}). Close and reopen the panel to try again.`;
+    }
+    if (what === 'draw') {
+      // A DRA tab opened before an extension update runs an older page hook, which cannot draw.
+      if (this.hookVersion && this.hookVersion !== HOOK_VERSION) return 'Drawing an area needs the DRA tab to be reloaded (its page hook is from an older version of the extension).';
+      if (this.mapMode() !== 'dra') return 'Drawing an area needs DRA\'s map, which the extension cannot reach on this page. "Use map view" takes the part of the panel\'s map in view.';
+      // DRA's map without what drawing uses (the self-check's AREA_DRAW_HOOK item) is not a reason
+      // here: "Use map view" still works on that map, and AreaState.unavailable turns both buttons
+      // off. areaDraw says why instead, when the user asks to draw.
+    }
+    return undefined;
+  }
+
+  /**
+   * Starts reading the loaded state's block points if they are listed and not read yet; resolves
+   * with them (undefined without them). On success the area's counts appear (set); on failure
+   * areaUnavailable says why.
+   */
+  private ensurePoints(): Promise<Int32Array | undefined> {
+    const b = this.bundle;
+    if (!b || !b.manifest.points) return Promise.resolve(undefined);
+    if (b.points) return Promise.resolve(b.points);
+    if (this.pointsError?.bundle === b) return Promise.resolve(undefined);
+    if (this.pointsLoad?.bundle === b) return this.pointsLoad.promise;
+    const t0 = performance.now();
+    const promise = this.bundleSource.loadPoints(b).then(
+      (points) => {
+        this.perf.pointsMs = performance.now() - t0;
+        if (this.bundle === b) {
+          this.areaMaskCache = null;
+          this.set({});
+          this.fitMiniIdle();
+        }
+        return points;
+      },
+      (e: unknown) => {
+        this.pointsError = { bundle: b, message: e instanceof Error ? e.message : String(e) };
+        if (this.bundle === b) this.set({});
+        return undefined;
+      },
+    );
+    this.pointsLoad = { bundle: b, promise };
+    return promise;
+  }
+
+  /**
+   * What a map's area is remembered under. A live map: DRA's own id for it (the session id that
+   * leads its snapshot signature) when the page gives one, so two maps with the same name and size
+   * never share an area (with Only, one would silently narrow the other's solves) and a renamed map
+   * keeps its own. Without an id, and for a CSV, as the district locks (lockKey).
+   */
+  private areaKey(map: NonNullable<PanelState['map']>): string {
+    if (!map.sourceName && this.snap && this.snap.info.state === map.state && this.snap.info.nDistricts === map.numDistricts) {
+      const session = this.snap.sig.split('|')[0];
+      if (session) return `live|${map.state}|${map.numDistricts}|session:${session}`;
+    }
+    return lockKey(map);
+  }
+
+  private regionUnavailable(region: AreaRegion | undefined, state: string): string | undefined {
+    const b = this.bundle;
+    if (region && b?.manifest.state === state && regionName(b, region.kind, region.index) !== region.name) {
+      return `Choose ${region.name} again to use it with the current data.`;
+    }
+    return undefined;
+  }
+
+  /** Why a remembered county cluster cannot be used with the loaded data (see clusterUnavailable). */
+  private savedClusterUnavailable(cluster: AreaState['cluster'], state: string): string | undefined {
+    const b = this.bundle;
+    return cluster && b?.manifest.state === state ? clusterUnavailable(cluster, b.countyFips.length) : undefined;
+  }
+
+  /** inside[] for the selected region, cluster or ring on the loaded bundle. */
+  private areaMask(area: Pick<AreaState, 'ring' | 'region' | 'cluster'>, state: string) {
+    const b = this.bundle;
+    if (b?.manifest.state !== state) return null;
+    const { ring, region, cluster } = area;
+    const key = JSON.stringify(region ?? (cluster ? { cluster: cluster.counties } : ring));
+    if (!key) return null;
+    const c = this.areaMaskCache;
+    if (c && c.bundle === b && c.key === key) return c;
+    const t0 = performance.now();
+    let inside: Uint8Array;
+    if (region) {
+      const membership = region.kind === 'county' ? b.countyOf : b.townOf;
+      if (!membership || this.regionUnavailable(region, state)) return null;
+      inside = Uint8Array.from(membership, (index) => Number(index === region.index));
+    } else if (cluster) {
+      if (clusterUnavailable(cluster, b.countyFips.length)) return null;
+      inside = clusterMask(b.countyOf, cluster.counties);
+    } else if (ring && b.points) {
+      inside = insideMask(b.points, b.n, ring);
+    } else {
+      return null;
+    }
+    let blocks = 0;
+    for (let i = 0; i < inside.length; i++) blocks += inside[i];
+    this.perf.areaMaskMs = performance.now() - t0;
+    this.areaMaskCache = { bundle: b, key, inside, blocks, peopleField: null, people: 0 };
+    return this.areaMaskCache;
+  }
+
+  private areaPeople(m: NonNullable<ExtensionController['areaMaskCache']>): number {
+    if (m.peopleField !== this.popField) {
+      m.people = countInside(m.inside, m.bundle.pop[this.popField]).people;
+      m.peopleField = this.popField;
+    }
+    return m.people;
+  }
+
+  /** What a solve passes to the worker (AreaPreference), or undefined: no area, or it can't be used now. */
+  private solveArea(): { inside: Uint8Array; mode: AreaMode; blocks: number } | undefined {
+    const st = this.state;
+    if (!st.area || !st.map || st.connection !== 'live') return undefined;
+    const m = this.areaMask(st.area, st.map.state);
+    return m ? { inside: m.inside, mode: st.area.mode, blocks: m.blocks } : undefined;
+  }
+
+  /** Puts the current ring on DRA's map and the mini-map when it changed (or must be sent again). */
+  private syncAreaOutline() {
+    const ring = this.state.area?.ring ?? null;
+    const key = ring ? JSON.stringify(ring) : '';
+    if (key === this.areaShown) return;
+    this.areaShown = key;
+    this.link?.send({ t: 'area-show', ring });
+    this.miniArea?.show(ring);
+  }
+
+  private saveAreas() {
+    this.opts.areas?.save({ ...this.areas });
+  }
+
+  /** The options on offer were found for the old area (or none): drop them, like a lock change. */
+  private dropForArea() {
+    this.solveSeq++;
+    this.full.clear();
+    this.highlightSeq++;
+    this.clearMap();
+    this.set({ solutions: [], hoveredSolutionId: undefined, solve: this.state.solve.status === 'loading-data' ? this.state.solve : { status: 'idle' } });
+  }
+
+  /** Makes `ring` the current map's area (replacing any), keeping its mode. */
+  private setAreaRing(ring: Ring) {
+    const map = this.state.map;
+    if (!map || this.state.walkthrough) {
+      // Not taken: make sure DRA's map shows what the panel has, not what was just drawn.
+      this.areaShown = null;
+      this.set({});
+      return;
+    }
+    const why = this.areaUnavailable(this.state, 'use');
+    if (why) {
+      // E.g. the panel went to CSV mode, or the data turned out to have no block points, while
+      // the user drew: an area that cannot be used is not saved (it would show, and do nothing).
+      this.areaShown = null;
+      this.set({ notice: { level: 'warn', text: `The area was not kept: ${why}` } });
+      return;
+    }
+    this.saveAreaSelection(map, { ring });
+  }
+
+  private saveAreaSelection(map: NonNullable<PanelState['map']>, area: AreaSelection) {
+    const key = this.areaKey(map);
+    const prev = this.areas[key];
+    const next: SavedArea = { ...area, mode: prev?.mode ?? this.areaPendingMode };
+    if (prev && JSON.stringify({ ring: prev.ring, region: prev.region, cluster: prev.cluster }) !== JSON.stringify({ ring: next.ring, region: next.region, cluster: next.cluster })) {
+      this.undoState = recordSettingUndo(this.undoState, {
+        kind: 'area',
+        mapKey: key,
+        prevArea: cloneSavedArea(prev),
+        label: 'Undo replacing area',
+      });
+    }
+    this.areas[key] = next;
+    this.saveAreas();
+    this.dropForArea();
+  }
+
+  private areaUseRegion(kind: AreaRegion['kind'], index: number) {
+    const { map, connection, walkthrough } = this.state;
+    const b = this.bundle;
+    if (!map || connection !== 'live' || walkthrough || b?.manifest.state !== map.state) return;
+    const name = regionName(b, kind, index);
+    if (!name) return;
+    this.areaCancelDraw();
+    this.saveAreaSelection(map, { region: { kind, index, name } });
+  }
+
+  private areaPickRegion(kind: AreaRegion['kind']) {
+    const { map, walkthrough, regions } = this.state;
+    if (!map || walkthrough || this.areaDrawing || this.areaPick) return;
+    if (!(kind === 'county' ? regions?.counties.length : regions?.towns.length)) return;
+    if (this.areaUnavailable(this.state, 'draw')) return;
+    const pick = { kind, reqId: ++this.viewSeq };
+    this.areaPick = pick;
+    this.link.send({ t: 'area-pick-start', ...pick });
+    this.set({});
+    void this.ensurePoints();
+  }
+
+  private async onAreaPicked({ reqId, point, detail }: Extract<HookToPanel, { t: 'area-picked' }>) {
+    const pick = this.areaPick;
+    if (!pick || pick.reqId !== reqId) return;
+    if (!point) {
+      this.areaPick = undefined;
+      this.set(detail ? { notice: { level: 'warn', text: detail } } : {});
+      return;
+    }
+    const b = this.bundle;
+    const points = await this.ensurePoints();
+    if (this.areaPick !== pick) return;
+    this.areaPick = undefined;
+    if (!points || !b || this.bundle !== b) {
+      this.set({});
+      return;
+    }
+    const block = nearestBlock(points, point);
+    const index = (pick.kind === 'county' ? b.countyOf : b.townOf)?.[block];
+    if (index === undefined || !regionName(b, pick.kind, index)) {
+      this.set({ notice: { level: 'info', text: `The nearest block has no ${pick.kind} to select. Choose one from the list or pick another spot.` } });
+      return;
+    }
+    this.areaUseRegion(pick.kind, index);
+  }
+
+  /** area-draw: drawing happens on DRA's map (src/hook/area.ts); the hook reports the outline. */
+  private areaDraw() {
+    if (!this.state.map || this.state.walkthrough || this.areaDrawing || this.areaPick) return;
+    if (this.areaUnavailable(this.state, 'draw')) return; // state.area.unavailable says why
+    const item = this.check?.items.find((i) => i.id === AREA_DRAW_HOOK);
+    if (item && !item.ok) {
+      this.set({ notice: { level: 'warn', text: `Drawing an area needs DRA's map, and it lacks what drawing uses (${item.detail ?? 'unknown'}). "Use map view" still works: move DRA's map to the part you want and press it.` } });
+      return;
+    }
+    this.areaDrawing = true;
+    this.link.send({ t: 'area-draw-start' });
+    this.set({});
+  }
+
+  private areaCancelDraw() {
+    if (!this.areaDrawing && !this.areaPick) return;
+    this.areaDrawing = false;
+    this.areaPick = undefined;
+    this.link.send({ t: 'area-draw-cancel' });
+    this.set({});
+  }
+
+  private onAreaDrawn(ring: AreaRing) {
+    if (!this.areaDrawing) {
+      // Cancelled here while the user finished there: keep what the panel has.
+      this.areaShown = null;
+      this.set({});
+      return;
+    }
+    this.areaDrawing = false;
+    const clean = cleanRing(ring);
+    if (!clean) {
+      this.areaShown = null;
+      this.set({ notice: { level: 'warn', text: 'The outline drawn was not a usable area (it needs at least 3 corners, and its edges must not cross). Draw it again.' } });
+      return;
+    }
+    this.setAreaRing(clean);
+  }
+
+  /** area-use-view: the part of DRA's map in view, or of the mini-map when DRA's map is out of reach. */
+  private async areaUseView() {
+    const map = this.state.map;
+    if (!map || this.state.walkthrough || this.areaUnavailable(this.state, 'use')) return;
+    this.areaCancelDraw();
+    const key = this.areaKey(map);
+    const previous = this.areas[key];
+    const fromDra = this.mapMode() === 'dra';
+    const ring = fromDra ? await this.requestView() : (this.miniArea?.view() ?? null);
+    // The map may have changed (or a walkthrough started) while DRA answered.
+    if (!this.state.map || this.areaKey(this.state.map) !== key || this.state.walkthrough) return;
+    if (this.areas[key] !== previous || this.areaDrawing || this.areaPick) return;
+    const clean = cleanRing(ring);
+    if (!clean) {
+      this.set({ notice: { level: 'warn', text: fromDra ? "DRA's map did not say what is in view. Try again, or draw the area." : "The panel's map is not showing yet, so there is no view to take. Try again once it shows." } });
+      return;
+    }
+    this.setAreaRing(clean);
+  }
+
+  private requestView(): Promise<AreaRing | null> {
+    const reqId = ++this.viewSeq;
+    return new Promise((resolve) => {
+      this.viewWaiters.set(reqId, resolve);
+      this.link.send({ t: 'request-view', reqId });
+      setTimeout(() => {
+        if (this.viewWaiters.delete(reqId)) resolve(null);
+      }, VIEW_TIMEOUT_MS);
+    });
+  }
+
+  private areaClear() {
+    const map = this.state.map;
+    if (!map || this.state.walkthrough) return;
+    this.areaCancelDraw();
+    const key = this.areaKey(map);
+    const prev = this.areas[key];
+    if (!prev) return;
+    this.undoState = recordSettingUndo(this.undoState, {
+      kind: 'area',
+      mapKey: key,
+      prevArea: cloneSavedArea(prev),
+      label: 'Undo clearing area',
+    });
+    delete this.areas[key];
+    this.saveAreas();
+    this.dropForArea();
+  }
+
+  private setAreaMode(mode: AreaMode) {
+    if (mode !== 'prefer' && mode !== 'only') return;
+    const map = this.state.map;
+    if (!map || this.state.walkthrough) return;
+    const key = this.areaKey(map);
+    const saved = this.areas[key];
+    if (!saved) {
+      // No area yet: the next one starts in this mode.
+      if (this.areaPendingMode !== mode) {
+        this.areaPendingMode = mode;
+        this.set({});
+      }
+      return;
+    }
+    if (saved.mode === mode) return;
+    this.areas[key] = { ...saved, mode };
+    this.areaPendingMode = mode;
+    this.saveAreas();
+    this.dropForArea();
+  }
+
+  // ---------------------------------------------------------------------------
+  // County clusters (PanelState.clusters, contracts/clusters.ts)
+  // ---------------------------------------------------------------------------
+
+  /** clusters-find: run the search in the engine worker on the loaded state's graph. */
+  private clustersFind(numDistricts: number, tolerance: number) {
+    const b = this.bundle;
+    const graph = this.graph;
+    const prev = this.state.clusters;
+    const refuse = (message: string) => {
+      this.clustersResultMessage = message;
+      this.set({ clusters: { status: 'error', numDistricts: Number(numDistricts), tolerance: Number(tolerance), results: [], message } });
+    };
+    if (!b || !graph || !this.engine || (this.state.map && b.manifest.state !== this.state.map.state)) {
+      refuse("The state's data is not loaded yet. Find clusters once it is in.");
+      return;
+    }
+    let totalPop = 0;
+    for (let i = 0; i < graph.n; i++) totalPop += graph.pop[i];
+    const req = clusterRequest({ numDistricts, tolerance, counties: b.countyFips.length, totalPop, testDelayMs: this.testSolveDelayMs });
+    if (!req.body) {
+      refuse(req.message);
+      return;
+    }
+    const body = req.body;
+    // A search still running would hold up this one (the worker does one thing at a time).
+    if (prev?.status === 'finding') void this.stopClusterSearch();
+    const seq = ++this.clustersSeq;
+    this.clusterHoverSeq++;
+    this.showClusters(null);
+    this.clustersResultMessage = undefined;
+    this.clustersNote = undefined;
+    const base = { numDistricts: body.numDistricts, tolerance: body.tolerance };
+    this.set({ clusters: { status: 'finding', ...base, districtSize: totalPop / body.numDistricts, results: [] } });
+    const names = countyNames(b);
+    const run = (retries: number): Promise<void> =>
+      this.engine!.request<Extract<WorkerResponse, { type: 'clusters-result' }>>(body)
+        .then(({ result }) => {
+          if (seq !== this.clustersSeq || this.bundle !== b) return;
+          const status = result.status === 'ok' ? (result.clusterings.length ? 'done' : 'none') : result.status;
+          const pct = `±${+(body.tolerance * 100).toFixed(2)}%`;
+          const message =
+            result.message ??
+            (status === 'none'
+              ? `No split of the state into whole-county clusters fits ${body.numDistricts.toLocaleString('en-US')} districts at ${pct}${result.exhaustive ? '' : ' (none was found in the time allowed)'}. Try a larger tolerance.`
+              : undefined);
+          this.clustersResultMessage = message;
+          this.set({
+            clusters: {
+              status,
+              ...base,
+              districtSize: result.districtSize,
+              results: withCountyNames(result, names),
+              exhaustive: result.exhaustive,
+              ...(this.clustersMessage() ? { message: this.clustersMessage() } : {}),
+              elapsedMs: Math.round(result.elapsedMs),
+            },
+          });
+        })
+        .catch((e: unknown) => {
+          if (seq !== this.clustersSeq) return;
+          // The worker was restarted under the search (a solve was cancelled, say): run it again.
+          if (e instanceof CancelledError && retries > 0 && this.engine) return run(retries - 1);
+          const message = e instanceof CancelledError ? 'The search was interrupted. Find clusters again.' : `The cluster search failed: ${e instanceof Error ? e.message : String(e)}`;
+          this.clustersResultMessage = message;
+          this.set({ clusters: { status: 'error', ...base, results: [], message } });
+        });
+    void run(1);
+  }
+
+  /** clusters-cancel: like cancel-solve, the worker is restarted (a search can't be interrupted otherwise). */
+  private async clustersCancel() {
+    const c = this.state.clusters;
+    if (c?.status !== 'finding' || !this.engine) return;
+    this.clustersSeq++;
+    this.clustersResultMessage = 'Cancelled.';
+    this.set({ clusters: { ...c, status: 'idle', results: [], message: 'Cancelled.' } });
+    await this.stopClusterSearch();
+  }
+
+  /**
+   * Restarts the engine worker to stop a cluster search. Whatever was queued behind the search
+   * goes with it: a solve is reported cancelled, the interaction view is measured again.
+   */
+  private async stopClusterSearch() {
+    if (!this.engine) return;
+    if (this.state.solve.status === 'solving') {
+      this.solveSeq++;
+      this.set({ solve: { status: 'idle', message: 'Cancelled, with the cluster search.' } });
+    }
+    this.scopeSeq++;
+    this.interactionInFlight = 0;
+    try {
+      await this.engine.restart();
+    } catch (e) {
+      if (!(e instanceof CancelledError)) console.warn('[zd] engine restart failed', e);
+    }
+    if (!this.state.interaction && !this.state.feasibility) this.refreshInteraction();
+  }
+
+  /** Forget the clusters (another state): results, the picture on the maps, the outlines read. */
+  private dropClusters() {
+    if (this.state.clusters?.status === 'finding' && this.engine) void this.engine.restart().catch(() => {});
+    this.clustersSeq++;
+    this.clusterHoverSeq++;
+    this.showClusters(null);
+    this.clustersNote = undefined;
+    this.clustersResultMessage = undefined;
+    this.outlinesLoad = null;
+    this.countyAdj = null;
+  }
+
+  private clustersMessage(): string | undefined {
+    const parts = [this.clustersResultMessage, this.clustersNote].filter(Boolean);
+    return parts.length ? parts.join(' ') : undefined;
+  }
+
+  private setClustersNote(note: string | undefined) {
+    if (note === this.clustersNote) return;
+    this.clustersNote = note;
+    const c = this.state.clusters;
+    if (!c) return;
+    const message = this.clustersMessage();
+    const { message: _old, ...rest } = c;
+    this.set({ clusters: message ? { ...rest, message } : rest });
+  }
+
+  /** The county outlines (BundleManifest.outlines), read once per state; undefined without them (clustersNote says why). */
+  private ensureOutlines(): Promise<CountyOutlines | undefined> {
+    const b = this.bundle;
+    if (!b) return Promise.resolve(undefined);
+    if (!b.manifest.outlines) {
+      this.setClustersNote("This state's data has no county outlines yet, so clusters are not drawn on the map.");
+      return Promise.resolve(undefined);
+    }
+    if (this.outlinesLoad?.bundle !== b) {
+      const t0 = performance.now();
+      const load: { bundle: StateBundle; promise: Promise<CountyOutlines | undefined>; failed?: string } = { bundle: b, promise: Promise.resolve(undefined) };
+      load.promise = this.bundleSource.loadOutlines(b).then(
+        (fc) => {
+          this.perf.outlinesMs = performance.now() - t0;
+          return fc;
+        },
+        (e: unknown) => {
+          // Kept for this state (no retry on every hover); reopening the panel tries again.
+          load.failed = `The county outlines could not be loaded (${e instanceof Error ? e.message : String(e)}), so clusters are not drawn on the map.`;
+          return undefined;
+        },
+      );
+      this.outlinesLoad = load;
+    }
+    const load = this.outlinesLoad;
+    // The note on every call, not only the first: a new search clears it.
+    return load.promise.then((fc) => {
+      if (load.failed && this.bundle === b) this.setClustersNote(load.failed);
+      return fc;
+    });
+  }
+
+  private countyAdjacencyOf(graph: EngineGraph, counties: number): number[][] {
+    if (this.countyAdj?.graph !== graph) this.countyAdj = { graph, adj: countyAdjacency(graph, counties) };
+    return this.countyAdj.adj;
+  }
+
+  /** clusters-hover: outline a clustering (or one cluster of it) on DRA's map and the mini-map; null clears. */
+  private async clustersHover(id: string | null, cluster?: number) {
+    const c = this.state.clusters;
+    const seq = ++this.clusterHoverSeq;
+    if (!c) return;
+    if (id === null) {
+      if (c.hovered) this.set({ clusters: { ...c, hovered: undefined } });
+      this.showClusters(null);
+      return;
+    }
+    const clustering = c.results.find((r) => r.id === id);
+    if (!clustering) return;
+    const emphasize = cluster !== undefined && Number.isInteger(cluster) && cluster >= 0 && cluster < clustering.clusters.length ? cluster : undefined;
+    this.set({ clusters: { ...c, hovered: { id, ...(emphasize !== undefined ? { cluster: emphasize } : {}) } } });
+    const b = this.bundle;
+    const graph = this.graph;
+    if (!b || !graph) return;
+    const outlines = await this.ensureOutlines();
+    if (seq !== this.clusterHoverSeq || this.bundle !== b) return;
+    if (!outlines) {
+      this.showClusters(null);
+      return;
+    }
+    const colors = clusterColors(clustering, this.countyAdjacencyOf(graph, b.countyFips.length));
+    const { fc, missing } = clusterFeatures({ clustering, outlines, countyFips: b.countyFips, colors, emphasize });
+    this.setClustersNote(missing ? `${missing} ${missing === 1 ? 'county has' : 'counties have'} no outline in this state's data, so ${missing === 1 ? 'it is' : 'they are'} not drawn.` : undefined);
+    this.showClusters(fc);
+  }
+
+  private showClusters(fc: ClusterFC | null) {
+    if (!fc && !this.clusterShown) return;
+    this.clusterShown = fc;
+    this.link?.send({ t: 'clusters-show', fc });
+    this.miniClusters?.show(fc);
+  }
+
+  /** clusters-use-as-area: one cluster's counties become the swap area (AreaState.cluster). */
+  private clustersUseAsArea(id: string, index: number) {
+    const { map, connection, walkthrough, clusters } = this.state;
+    const b = this.bundle;
+    if (!map || walkthrough || !clusters || b?.manifest.state !== map.state) return;
+    const cluster = clusters.results.find((r) => r.id === id)?.clusters[index];
+    if (!cluster) return;
+    if (connection !== 'live') {
+      this.set({ notice: { level: 'warn', text: 'A cluster can be the area on a live DRA map only.' } });
+      return;
+    }
+    this.areaCancelDraw();
+    this.saveAreaSelection(map, { cluster: areaCluster(countyNames(b), cluster) });
   }
 
   private interactionInFlight = 0;
@@ -883,7 +1681,8 @@ export class ExtensionController implements PanelController {
     return applyTargets(a, done);
   }
 
-  private async solve(opts: { locked?: Uint8Array; autoStart?: boolean } = {}) {
+  /** Resolves true when it found solutions (with `autoStart`, a walkthrough of the first started); else false or undefined. */
+  private async solve(opts: { locked?: Uint8Array; autoStart?: boolean } = {}): Promise<boolean | undefined> {
     const why = this.canSuggest();
     if (why) {
       this.set({ solve: { status: 'error', message: why } });
@@ -908,12 +1707,42 @@ export class ExtensionController implements PanelController {
     const devOf = (d: number) => this.state.districts.find((r) => r.index === d)?.deviation ?? 0;
     const trade =
       scope.mode === 'one'
-        ? oneDistrictTrade({ district: scope.district, with: scope.with, neighbors: this.neighborsOf(scope.district), lockedDistricts, unassignedPop, deviationOf: devOf, name: (d) => this.districtName(d) })
+        ? oneDistrictTrade({ district: scope.district, with: scope.with, goal: scope.goal, neighbors: this.neighborsOf(scope.district), lockedDistricts, unassignedPop, deviationOf: devOf, name: (d) => this.districtName(d) })
         : null;
     if (trade?.error) {
       this.set({ solutions: [], solve: { status: 'error', message: trade.error } });
       return;
     }
+    // The user's area, for every kind of solve (re-plan from here included). Its block points are
+    // read the first time an area needs them; a solve started before they are in waits for them.
+    if (this.state.area?.ring && this.bundle?.manifest.points && !this.bundle.points) {
+      const before = this.solveSeq;
+      this.set({ solve: { status: 'loading-data', message: 'Loading block locations for your area…' } });
+      await this.ensurePoints();
+      if (this.solveSeq !== before) return; // something else started (or dropped) a solve meanwhile
+    }
+    // An area that is marked but cannot be used now (no block points in the data, say) is never
+    // ignored silently: with Only nothing is solved (blocks outside it would move), with Prefer the
+    // solve runs without it and the status line says so.
+    const area = this.solveArea();
+    const selected = this.state.area;
+    const areaIgnored = (selected?.ring || selected?.region || selected?.cluster) && !area
+      ? (selected.region && this.state.map
+          ? this.regionUnavailable(selected.region, this.state.map.state)
+          : selected.cluster && this.state.map
+            ? this.savedClusterUnavailable(selected.cluster, this.state.map.state)
+            : this.areaUnavailable(this.state, 'use')) ?? 'which blocks are inside it is not known yet.'
+      : undefined;
+    if (areaIgnored && this.state.area?.mode === 'only') {
+      this.set({ solutions: [], solve: { status: 'error', message: `Your area is set to Only, but it can't be used: ${areaIgnored} Clear the area (or switch it to Prefer) to zero without it.` } });
+      return;
+    }
+    // Each request gets its own copy of the mask, moved to the worker rather than cloned.
+    const areaPayload = (): { fields: { area?: AreaPreference }; transfer: Transferable[] } => {
+      if (!area) return { fields: {}, transfer: [] };
+      const inside = area.inside.slice();
+      return { fields: { area: { inside, mode: area.mode } }, transfer: [inside.buffer] };
+    };
     const seq = ++this.solveSeq;
     const targets = this.targets!;
     this.set({ solve: { status: 'solving', progress: 0 }, solutions: [], hoveredSolutionId: undefined });
@@ -931,20 +1760,26 @@ export class ExtensionController implements PanelController {
         // does to its own deviation: that is the user's call. Unassigned has no limit either way.
         const district = scope.district;
         const chosen = trade.chosen;
+        const goal = scope.goal;
         const choice = {
           ...(trade.absorbers ? { absorbers: trade.absorbers } : {}),
           ...(trade.includeUnassigned ? { includeUnassigned: true } : {}),
           ...(trade.neighborTolerance !== undefined ? { neighborTolerance: trade.neighborTolerance } : {}),
+          ...(goal !== undefined ? { goal } : {}),
         };
-        const r = await this.engine!.request<Extract<WorkerResponse, { type: 'district-result' }>>({ type: 'solve-district', assignment, targets, district: scope.district, ...choice, maxOptions: 6, locked: opts.locked, lockedDistricts, testDelayMs: this.testSolveDelayMs || undefined });
+        const ap = areaPayload();
+        const r = await this.engine!.request<Extract<WorkerResponse, { type: 'district-result' }>>({ type: 'solve-district', assignment, targets, district: scope.district, ...choice, maxOptions: 6, locked: opts.locked, lockedDistricts, ...ap.fields, testDelayMs: this.testSolveDelayMs || undefined }, undefined, ap.transfer);
         solutions = r.result.solutions;
         message = r.result.message;
         status = mapStatus(r.result.status);
         workerMs = r.result.elapsedMs;
-        if (r.result.status === 'already-zero') message = message ?? 'This district is already at zero.';
+        if (r.result.status === 'already-zero') {
+          message = message ?? (goal !== undefined ? `${this.districtName(district)} is already at ${formatGoal(goal)}.` : 'This district is already at zero.');
+        }
         message = solveDistrictMessage({
           district: scope.district,
           chosen,
+          goal,
           shown: solutions.length,
           status: r.result.status,
           fallback: r.fallback,
@@ -952,6 +1787,18 @@ export class ExtensionController implements PanelController {
           dropped: r.choiceDropped,
           name: (d) => this.districtName(d),
         });
+        if (area) {
+          // With 'only' and nothing found, the area is why; with 'prefer', say when every option leaves it.
+          // (With a choice of neighbors, the "pick more neighbors" advice is already in the message.)
+          message = areaSolveMessage({ mode: area.mode, status, alreadyZero: r.result.status === 'already-zero', outside: solutions.map((s) => s.stats.outsideArea), blocksInside: area.blocks, who: this.districtName(district), areaDropped: r.areaDropped, message });
+          if (r.insideTwoWay) {
+            const oneWayInside = solutions.some((s) => s.kind === 'single' && s.stats.outsideArea === 0);
+            const note = oneWayInside
+              ? 'After the one-way options inside your area come plans that trade in both directions inside it (paint their steps in order); options that move blocks outside it come last.'
+              : 'No one-way move stays inside your area, so the first plans trade in both directions inside it (paint their steps in order); the options after them move blocks outside it.';
+            message = message ? `${note} ${message}` : note;
+          }
+        }
         if (!solutions.length && lockedSet.size && r.result.status !== 'already-zero' && r.result.status !== 'error') {
           const shut = (this.neighborsOf(district) ?? []).filter((d) => lockedSet.has(d));
           if (shut.length) message = `${message ? `${message} ` : ''}${this.districtNames(shut)} ${shut.length === 1 ? 'is a locked neighbor and was' : 'are locked neighbors and were'} left out; unlocking gives more room.`;
@@ -962,12 +1809,14 @@ export class ExtensionController implements PanelController {
           this.set({ solve: { status: 'error', message: scope.mode === 'all' ? 'Every district is locked. Unlock the ones you want to change.' : 'No districts selected.' } });
           return;
         }
+        const ap = areaPayload();
         const r = await this.engine!.request<Extract<WorkerResponse, { type: 'group-result' }>>(
-          { type: 'solve-group', assignment, targets, districts, allowOutsideAbsorb: scope.mode === 'group' ? scope.allowOutsideAbsorb : false, ...this.outsideTrade(scope, districts, unassignedPop), locked: opts.locked, lockedDistricts, testDelayMs: this.testSolveDelayMs || undefined },
+          { type: 'solve-group', assignment, targets, districts, allowOutsideAbsorb: scope.mode === 'group' ? scope.allowOutsideAbsorb : false, ...this.outsideTrade(scope, districts, unassignedPop), locked: opts.locked, lockedDistricts, ...ap.fields, testDelayMs: this.testSolveDelayMs || undefined },
           (done, total) => {
             this.progressEvents++;
             if (seq === this.solveSeq) this.set({ solve: { status: 'solving', progress: total ? done / total : 0 } });
           },
+          ap.transfer,
         );
         solutions = r.result.solutions;
         message = r.result.message;
@@ -977,7 +1826,8 @@ export class ExtensionController implements PanelController {
         interaction = r.result.interaction?.nodes?.length ? r.result.interaction : undefined;
         // The planner words its feasibility line for a group; on the whole map it is noise, and
         // with locks the thing worth saying is what was left alone.
-        if (scope.mode === 'all' && solutions.length && message === 'This group can be zeroed on its own.') {
+        // (The planner may put an area note in front of it; areaSolveMessage says that its own way.)
+        if (scope.mode === 'all' && solutions.length && (area ? splitAreaSentences(message).rest : message) === 'This group can be zeroed on its own.') {
           message = lockedSet.size ? `${lockedNames} ${lockedDistricts.length === 1 ? 'is locked and stays as it is' : 'are locked and stay as they are'}; these plans change only the other ${districts.length} districts.` : undefined;
         }
         if (r.result.status === 'group-unbalanced' && scope.mode === 'all' && lockedSet.size) {
@@ -994,6 +1844,7 @@ export class ExtensionController implements PanelController {
           const who = `${unassignedPop.toLocaleString('en-US')} ${unassignedPop === 1 ? 'person is' : 'people are'}`;
           message = `${who} still unassigned; finish assigning them, or zero districts one at a time or as a group with Unassigned.`;
         }
+        if (area) message = areaSolveMessage({ mode: area.mode, status, outside: solutions.map((s) => s.stats.outsideArea), blocksInside: area.blocks, who: scope.mode === 'all' ? 'the map' : 'this group', areaDropped: r.areaDropped, message });
       }
       if (seq !== this.solveSeq) return;
       if (solutions.some(hasTwoWayTrade) && scope.mode !== 'one') {
@@ -1015,11 +1866,16 @@ export class ExtensionController implements PanelController {
       // The engine's own elapsed time (real since the engine update); the round trip is kept for diagnostics.
       this.perf.lastSolveMs = performance.now() - t0;
       this.perf.lastSolveWorkerMs = workerMs;
+      if (areaIgnored) {
+        const note = `Your area was not used: ${areaIgnored}`;
+        message = message ? `${note} ${message}` : note;
+      }
       const patch: Partial<PanelState> = { solutions: cards, solve: { status, message, elapsedMs: Math.round(workerMs || this.perf.lastSolveMs) } };
       if (scope.mode === 'group' && feasibility) patch.feasibility = feasibility;
       if (interaction) patch.interaction = interaction;
       this.set(patch);
       if (opts.autoStart && solutions[0]) this.startWalkthrough(solutions[0].id, true);
+      return solutions.length > 0;
     } catch (e) {
       if (seq !== this.solveSeq || e instanceof CancelledError) return;
       this.set({ solve: { status: 'error', message: e instanceof Error ? e.message : String(e) } });
@@ -1160,6 +2016,8 @@ export class ExtensionController implements PanelController {
   private startWalkthrough(solutionId: string, keepDone = false) {
     const sol = this.full.get(solutionId);
     if (!sol || !this.assignment || !this.bundle) return;
+    this.areaCancelDraw(); // the area cannot change during a walkthrough
+    this.undoState = clearSettingUndo(this.undoState); // locks and area cannot change during a walkthrough
     const ctx = this.stepContext();
     const prev = keepDone ? this.state.walkthrough : undefined;
     const prevPlan = keepDone ? this.plan : null;
@@ -1224,8 +2082,12 @@ export class ExtensionController implements PanelController {
     const targets = this.targets;
     if (!plan || !targets || !allStepsDone(w) || (this.snap?.pendingShatter.length ?? 0) > 0) return w.finalCheck ? { ...w, finalCheck: undefined } : w;
     const after = this.currentDraPops();
-    const scopeDistricts = this.scopeDistricts();
-    const ok = scopeDistricts.every((d) => isZeroed(after.get(d) ?? 0, targets));
+    const scope = this.state.scope;
+    const scopeDistricts = this.scopeDistricts(scope);
+    const goal = scope.mode === 'one' ? scope.goal : undefined;
+    const ok = scopeDistricts.every((d) =>
+      goal !== undefined ? (after.get(d) ?? 0) === targets.draTarget + goal : isZeroed(after.get(d) ?? 0, targets),
+    );
     return { ...w, finalCheck: { ok, deviations: deviationChanges(plan.districts, plan.popsBefore, after, targets.draTarget) } };
   }
 
@@ -1305,7 +2167,21 @@ export class ExtensionController implements PanelController {
     });
     // Blocks of finished steps are locked in both scopes, so no block is ever planned to move twice
     // (in particular the first leg of a two-way trade is never undone by the re-plan).
-    await this.solve({ locked, autoStart: true });
+    const found = await this.solve({ locked, autoStart: true });
+    // A re-plan that works starts a new walkthrough. One that finds nothing leaves this one up, and
+    // the walkthrough view does not show the solve status, so say it in the banner (with what can
+    // be done from here: the area and the districts cannot change during a walkthrough).
+    const st = this.state;
+    if (!st.walkthrough || st.solve.status === 'solving' || st.solve.status === 'loading-data') return;
+    if (found) {
+      if (this.replanNotice && st.notice?.text === this.replanNotice) this.set({ notice: undefined });
+      this.replanNotice = null;
+      return;
+    }
+    const why = st.solve.message ?? 'no plan for the rest was found.';
+    const text = `Re-plan from here found nothing: ${why} You can keep painting this walkthrough, or end it to change the area or the districts and solve again.`;
+    this.replanNotice = text;
+    this.set({ notice: { level: 'warn', text } });
   }
 
   private endWalkthrough() {
@@ -1359,7 +2235,7 @@ export class ExtensionController implements PanelController {
     const ap = this.state.autoPaint;
     const w = this.state.walkthrough;
     if (!skipPanelChecks && (!ap?.available || !ap.enabled)) return;
-    if (this.paintBusy || this.paintWaiter || !w || !this.plan) return;
+    if (this.paintBusy || this.paintWaiter || this.undoBusy || this.undoWaiter || !w || !this.plan) return;
     const step = w.steps[w.current];
     if (!step) return;
     if (step.status === 'done') return this.refusePaint(step.id, 'This step is already painted.');
@@ -1368,12 +2244,14 @@ export class ExtensionController implements PanelController {
     if (solving === 'solving' || solving === 'loading-data') return this.refusePaint(step.id, 'Wait for the solve or re-plan to finish.');
     const reqId = ++this.paintSeq;
     const stepIndex = w.current;
+    const reqStep: PaintStepRequest = { stepId: step.id, precinctId: step.precinctId, from: step.from, to: step.to, wholePrecinct: step.wholePrecinct, blocks: step.blocks.map((b) => b.geoid) };
     this.paintBusy = true;
     this.paintNote = null;
     this.paintWaiter = {
       reqId,
       stepId: step.id,
       stepIndex,
+      step: reqStep,
       timer: setTimeout(() => {
         if (this.paintWaiter?.reqId !== reqId) return;
         this.onPaintResult(reqId, {
@@ -1387,7 +2265,7 @@ export class ExtensionController implements PanelController {
       }, PAINT_TIMEOUT_MS),
     };
     this.set({});
-    this.link.send({ t: 'paint-step', reqId, step: { stepId: step.id, precinctId: step.precinctId, from: step.from, to: step.to, wholePrecinct: step.wholePrecinct, blocks: step.blocks.map((b) => b.geoid) } });
+    this.link.send({ t: 'paint-step', reqId, step: reqStep });
   }
 
   private onPaintResult(reqId: number, r: PaintResult) {
@@ -1399,6 +2277,32 @@ export class ExtensionController implements PanelController {
     const n = waiter.stepIndex + 1;
     if (r.status === 'painted') {
       this.lastPaint = `step ${n} (${r.stepId}): painted, ${r.blocksMoved} blocks moved, ${r.featuresChanged} DRA features changed, ${r.ms} ms`;
+      if (r.undoPos !== undefined && r.undoBefore !== undefined) {
+        const entry: PaintUndoEntry = {
+          stepId: waiter.step.stepId,
+          stepIndex: waiter.stepIndex,
+          stepNumber: n,
+          precinctId: waiter.step.precinctId,
+          from: waiter.step.from,
+          to: waiter.step.to,
+          wholePrecinct: waiter.step.wholePrecinct,
+          blocks: waiter.step.blocks,
+          undoBefore: r.undoBefore,
+          undoPos: r.undoPos,
+          ...(r.undoTopId !== undefined ? { undoTopId: r.undoTopId } : {}),
+          minSnapSeq: r.snapSeq ?? 0,
+          label: paintUndoLabel(n, waiter.step.to),
+        };
+        this.undoState = recordPaintUndo(this.undoState, entry);
+        if (this.snap && this.snap.seq > entry.minSnapSeq) {
+          this.undoState = reconcileDraSnapshot(this.undoState, {
+            seq: this.snap.seq,
+            undoPos: this.snap.undoPos,
+            undoTopId: this.snap.undoTopId,
+            pendingShatter: this.snap.pendingShatter,
+          });
+        }
+      }
       this.set({});
       // Tick from the fresh plan right away (the hook also sends one after every paint).
       this.link.send({ t: 'request-snapshot' });
@@ -1407,11 +2311,20 @@ export class ExtensionController implements PanelController {
     if (r.status === 'refused') {
       this.lastPaint = `step ${n} (${r.stepId}): refused: ${r.reason}`;
       this.paintNote = { stepId: r.stepId, text: `Not painted: ${r.reason}` };
+      if (this.snap) {
+        this.undoState = reconcileDraSnapshot(this.undoState, {
+          seq: this.snap.seq,
+          undoPos: this.snap.undoPos,
+          undoTopId: this.snap.undoTopId,
+          pendingShatter: this.snap.pendingShatter,
+        });
+      }
       this.set({});
       return;
     }
     // Anything other than exactly what was asked: stop for good (this session), switch the setting
     // off, say precisely what differs and how to take it back. The extension never calls undo itself.
+    this.undoState = clearPaintUndo(this.undoState);
     const undo = !r.changedSomething
       ? 'Nothing changed in DRA, so there is nothing to undo.'
       : r.undoRecorded
@@ -1425,6 +2338,131 @@ export class ExtensionController implements PanelController {
     this.autoPaintPref = false;
     this.opts.autoPaint?.save(false);
     this.set({ notice: { level: 'error', text: `Painting step ${n} did not do what was asked. ${r.summary} ${undo}` } });
+    this.link.send({ t: 'request-snapshot' });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Undo (PanelState.undo): painted steps via DRA's actionUndo, or destructive panel settings
+  // ---------------------------------------------------------------------------
+
+  private undoContext(st: PanelState): UndoContext {
+    return {
+      mapKey: st.map ? this.areaKey(st.map) : null,
+      inWalkthrough: Boolean(st.walkthrough),
+      canUndoPaint: this.source === 'live' && st.connection === 'live' && this.snap?.paint?.ok === true,
+    };
+  }
+
+  private undo() {
+    if (this.paintBusy || this.paintWaiter || this.undoBusy || this.undoWaiter) return;
+    const active = activeUndoEntry(this.undoState, this.undoContext(this.state));
+    if (!active) return;
+    if (active.kind === 'setting') {
+      this.undoSetting(active.entry);
+      return;
+    }
+    this.undoPaintedStep(active.entry);
+  }
+
+  private undoSetting(entry: SettingUndoEntry) {
+    const map = this.state.map;
+    if (!map || this.state.walkthrough) return;
+    this.undoState = clearSettingUndo(this.undoState);
+    if (entry.kind === 'locks') {
+      const key = lockKey(map);
+      if (entry.prevLocks.length) this.locks[key] = entry.prevLocks.slice();
+      else delete this.locks[key];
+      this.opts.locks?.save({ ...this.locks });
+      const scope =
+        JSON.stringify(this.state.scope) === JSON.stringify(entry.afterScope)
+          ? entry.prevScope
+          : withoutLocked(this.state.scope, entry.prevLocks);
+      this.solveSeq++;
+      this.full.clear();
+      this.highlightSeq++;
+      this.clearMap();
+      this.set({
+        scope,
+        solutions: [],
+        hoveredSolutionId: undefined,
+        feasibility: undefined,
+        interaction: undefined,
+        solve: this.state.solve.status === 'loading-data' ? this.state.solve : { status: 'idle' },
+      });
+      this.refreshInteraction();
+      return;
+    }
+    this.areaCancelDraw();
+    const key = this.areaKey(map);
+    const restored = cloneSavedArea(entry.prevArea);
+    this.areas[key] = restored;
+    this.areaPendingMode = restored.mode;
+    this.saveAreas();
+    this.dropForArea();
+  }
+
+  private undoPaintedStep(entry: PaintUndoEntry) {
+    const reqId = ++this.undoSeq;
+    this.undoBusy = true;
+    this.undoWaiter = {
+      reqId,
+      entry,
+      timer: setTimeout(() => {
+        if (this.undoWaiter?.reqId !== reqId) return;
+        this.onUndoResult(reqId, {
+          status: 'mismatch',
+          stepId: entry.stepId,
+          summary: `The DRA tab did not answer within ${PAINT_TIMEOUT_MS / 1000} s, so the extension cannot tell whether undo ran.`,
+          details: [],
+          changedSomething: true,
+        });
+      }, PAINT_TIMEOUT_MS),
+    };
+    this.set({});
+    this.link.send({
+      t: 'undo-paint',
+      reqId,
+      req: {
+        stepId: entry.stepId,
+        precinctId: entry.precinctId,
+        from: entry.from,
+        to: entry.to,
+        wholePrecinct: entry.wholePrecinct,
+        blocks: entry.blocks,
+        expectedUndoPos: entry.undoPos,
+        ...(entry.undoTopId !== undefined ? { expectedUndoTopId: entry.undoTopId } : {}),
+      },
+    });
+  }
+
+  private onUndoResult(reqId: number, r: UndoPaintResult) {
+    const waiter = this.undoWaiter;
+    if (!waiter || waiter.reqId !== reqId) return;
+    clearTimeout(waiter.timer);
+    this.undoWaiter = null;
+    this.undoBusy = false;
+    const { entry } = waiter;
+    if (r.status === 'undone') {
+      this.lastPaint = `undo step ${entry.stepNumber} (${r.stepId}): undone, ${r.blocksRestored} blocks restored, ${r.featuresChanged} DRA features changed, ${r.ms} ms`;
+      this.undoState = afterPaintUndone(this.undoState, entry.stepId, r);
+      const w = this.state.walkthrough;
+      const idx = w ? w.steps.findIndex((s) => s.id === entry.stepId) : -1;
+      if (idx >= 0) this.setCurrent(idx, false);
+      else this.set({});
+      this.link.send({ t: 'request-snapshot' });
+      return;
+    }
+    if (r.status === 'refused') {
+      this.lastPaint = `undo step ${entry.stepNumber} (${r.stepId}): refused: ${r.reason}`;
+      if (r.stale) this.undoState = clearPaintUndo(this.undoState);
+      this.set({ notice: { level: 'warn', text: `Could not undo step ${entry.stepNumber}: ${r.reason}` } });
+      return;
+    }
+    this.undoState = clearPaintUndo(this.undoState);
+    const text = `Undoing step ${entry.stepNumber} did not put the blocks back as expected. ${r.summary} ${r.details.join(' ')}`.replace(/\s+/g, ' ').trim();
+    this.lastPaint = `undo step ${entry.stepNumber} (${r.stepId}): MISMATCH: ${text}`;
+    console.warn('[zd] undo mismatch', r);
+    this.set({ notice: { level: 'error', text } });
     this.link.send({ t: 'request-snapshot' });
   }
 
@@ -1447,6 +2485,7 @@ export class ExtensionController implements PanelController {
     if (this.state.walkthrough) this.endWalkthrough();
     this.source = 'csv';
     this.solveSeq++;
+    this.undoState = emptyUndo();
     this.resetDerived();
     this.snap = null;
     this.targets = null;
@@ -1500,9 +2539,59 @@ export class ExtensionController implements PanelController {
   // Mini-map + test hooks
   // ---------------------------------------------------------------------------
 
-  attachMiniSink(sink: HighlightSink | null) {
+  /** The mini-map (fallback): its highlight sink, and its side of the area (outline, "Use map view"). */
+  attachMiniSink(sink: HighlightSink | null, area: AreaSink | null = null, clusters: ClusterSink | null = null) {
     this.miniSink = sink;
+    this.miniArea = sink ? area : null;
+    this.miniClusters = sink ? clusters : null;
+    this.miniClusters?.show(this.clusterShown);
     if (sink && this.lastHighlight) sink.show(this.lastHighlight.fc, this.lastHighlight.fit);
+    this.miniArea?.show(this.state.area?.ring ?? null);
+    if (this.miniArea && this.source === 'live') {
+      // The panel shows the mini-map for "Use map view" too, before anything is highlighted: point
+      // it at the area, or at the state (from its block points, read for this).
+      this.fitMiniIdle();
+      if (!this.state.area?.ring) void this.ensurePoints();
+    }
+  }
+
+  /** With nothing highlighted, the mini-map looks at the area, else at the whole state. */
+  private fitMiniIdle() {
+    const sink = this.miniSink;
+    if (!sink || !this.miniArea || this.lastHighlight) return;
+    const box = this.idleBox();
+    if (box) sink.show({ type: 'FeatureCollection', features: [] }, box);
+  }
+
+  private idleBoxCache: { bundle: StateBundle; box: BBox } | null = null;
+
+  private idleBox(): BBox | null {
+    const ring = this.state.area?.ring;
+    if (ring) {
+      const box: BBox = [Infinity, Infinity, -Infinity, -Infinity];
+      for (const [x, y] of ring) {
+        box[0] = Math.min(box[0], x);
+        box[1] = Math.min(box[1], y);
+        box[2] = Math.max(box[2], x);
+        box[3] = Math.max(box[3], y);
+      }
+      return box;
+    }
+    const b = this.bundle;
+    if (!b?.points || !this.state.map || b.manifest.state !== this.state.map.state) return null;
+    if (this.idleBoxCache?.bundle !== b) {
+      const box: BBox = [Infinity, Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < b.n; i++) {
+        const x = b.points[2 * i] / 1e6;
+        const y = b.points[2 * i + 1] / 1e6;
+        if (x < box[0]) box[0] = x;
+        if (y < box[1]) box[1] = y;
+        if (x > box[2]) box[2] = x;
+        if (y > box[3]) box[3] = y;
+      }
+      this.idleBoxCache = { bundle: b, box };
+    }
+    return this.idleBoxCache.box;
   }
 
   /** Calls `listener` after every state change (diagnostics footer). */
@@ -1553,6 +2642,9 @@ export class ExtensionController implements PanelController {
       notice: this.state.notice?.text ?? null,
       solve: this.state.solve,
       paint: { availability: this.snap?.paint ?? null, setting: this.autoPaintPref, shown: this.state.autoPaint ?? null, last: this.lastPaint },
+      area: this.state.area
+        ? { corners: this.state.area.ring?.length ?? 0, mode: this.state.area.mode, blocks: this.state.area.blocks, people: this.state.area.people, drawing: this.state.area.drawing, unavailable: this.state.area.unavailable, points: b ? !!b.manifest.points : null, pointsLoaded: b ? !!b.points : null, maskMs: this.perf.areaMaskMs }
+        : null,
       perf: { ...this.perf, engineInitMs: this.engine?.lastInitMs ?? 0, workerGeneration: this.engine?.generation ?? 0 },
     };
   }
@@ -1629,7 +2721,25 @@ export class ExtensionController implements PanelController {
       hookPerf: this.snap?.hookPerf ?? null,
       paint: { setting: this.autoPaintPref, busy: this.paintBusy, broken: this.paintBroken, last: this.lastPaint, hook: this.snap?.paint ?? null },
       solutionsFull: [...this.full.values()].map((s) => ({ id: s.id, transfers: s.transfers.map((t) => ({ from: t.from, to: t.to, people: t.people, blocks: t.blocks.length })) })),
+      area: { drawing: this.areaDrawing, saved: Object.keys(this.areas).length, maskBlocks: this.areaMaskCache?.blocks ?? null, maskMs: this.perf.areaMaskMs, points: this.bundle ? !!this.bundle.manifest.points : null, pointsLoaded: this.bundle ? !!this.bundle.points : null, key: this.state.map ? this.areaKey(this.state.map) : null },
     };
+  }
+
+  /** Test builds: the loaded state's county names and adjacency (tests check clusters against them). */
+  countyGraph(): { names: string[]; fips: string[]; adjacency: number[][] } | null {
+    const b = this.bundle;
+    if (!b || !this.graph) return null;
+    return { names: countyNames(b), fips: b.countyFips.slice(), adjacency: this.countyAdjacencyOf(this.graph, b.countyFips.length) };
+  }
+
+  /** GEOIDs of the blocks a solution on offer moves (tests check them against the area). */
+  solutionBlocks(id: string): string[] {
+    const sol = this.full.get(id);
+    const b = this.bundle;
+    if (!sol || !b) return [];
+    const moved = new Set<number>();
+    for (const t of sol.transfers) for (const i of t.blocks) moved.add(i);
+    return [...moved].map((i) => b.geoids[i]);
   }
 }
 

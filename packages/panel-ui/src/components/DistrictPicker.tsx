@@ -8,7 +8,6 @@ import {
   getSelectedDistrictIndexes,
   isUnassigned,
   sortDistrictsWorstFirst,
-  UNASSIGNED_COLOR,
   UNASSIGNED_NAME,
 } from '../format';
 
@@ -132,12 +131,11 @@ export function DistrictPicker({ state, dispatch, readOnly = false }: DistrictPi
         <button
           type="button"
           className="zd-btn zd-btn--ghost zd-btn--sm"
-          style={{ paddingLeft: 2 }}
           aria-expanded={!collapsed}
           onClick={() => setCollapsed((c) => !c)}
         >
           <span aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
-          <span className="zd-section-title" style={{ color: 'inherit' }}>
+          <span className="zd-section-title">
             Districts ({districts.length}) · worst first
           </span>
         </button>
@@ -170,12 +168,12 @@ export function DistrictPicker({ state, dispatch, readOnly = false }: DistrictPi
       </div>
 
       {!collapsed && (
-        <div className="zd-district-list" role="region" aria-label="District population list">
+        <div className="zd-list zd-district-list" role="region" aria-label="District population list">
           <div className={`zd-district-head${showCheckboxes ? '' : ' zd-district-head--one'}`}>
             {showCheckboxes && <span aria-hidden="true" />}
             <span>District</span>
-            <span style={{ textAlign: 'right' }}>Pop</span>
-            <span style={{ textAlign: 'right' }}>Dev</span>
+            <span className="zd-align-end">Pop</span>
+            <span className="zd-align-end">Dev</span>
             <span aria-hidden="true" />
           </div>
 
@@ -190,9 +188,9 @@ export function DistrictPicker({ state, dispatch, readOnly = false }: DistrictPi
               <div
                 key={row.index}
                 className={[
-                  'zd-district-row',
+                  'zd-list__row zd-district-row',
                   showCheckboxes ? '' : 'zd-district-row--one',
-                  isSelected ? 'zd-district-row--selected' : '',
+                  isSelected ? 'zd-list__row--selected' : '',
                   isLocked ? 'zd-district-row--locked' : '',
                   readOnly ? 'zd-district-row--readonly' : '',
                 ]
@@ -236,10 +234,10 @@ export function DistrictPicker({ state, dispatch, readOnly = false }: DistrictPi
                 <span className="zd-district-row__pop zd-num">{formatInt(row.pop)}</span>
                 <span className="zd-district-row__dev">
                   <span
-                    className={`zd-dev zd-dev--${tone}`}
+                    className={`zd-pill zd-num zd-pill--${tone}`}
                     aria-label={`${name} deviation ${formatSigned(row.deviation)}`}
                   >
-                    <span aria-hidden="true" style={{ fontSize: '9px' }}>
+                    <span aria-hidden="true" className="zd-symbol">
                       {symbol}
                     </span>
                     {formatSigned(row.deviation)}
@@ -247,7 +245,7 @@ export function DistrictPicker({ state, dispatch, readOnly = false }: DistrictPi
                 </span>
                 <button
                   type="button"
-                  className={`zd-lock${isLocked ? ' zd-lock--on' : ''}`}
+                  className={`zd-btn zd-btn--ghost zd-btn--sm zd-lock${isLocked ? ' zd-lock--on' : ''}`}
                   aria-pressed={isLocked}
                   aria-label={isLocked ? `Unlock ${name}` : `Lock ${name}`}
                   title={
@@ -273,12 +271,12 @@ export function DistrictPicker({ state, dispatch, readOnly = false }: DistrictPi
               is not a district, has no deviation, and cannot be selected or locked. */}
           {state.unassigned && (
             <div
-              className={`zd-district-row zd-district-row--unassigned${showCheckboxes ? '' : ' zd-district-row--one'}`}
+              className={`zd-list__row zd-district-row zd-district-row--unassigned${showCheckboxes ? '' : ' zd-district-row--one'}`}
               data-testid="unassigned-row"
             >
               {showCheckboxes && <span aria-hidden="true" />}
               <span className="zd-district-row__name">
-                <span className="zd-swatch" style={{ backgroundColor: UNASSIGNED_COLOR }} aria-hidden="true" />
+                <span className="zd-swatch zd-swatch--unassigned" aria-hidden="true" />
                 <span className="zd-district-row__label">{UNASSIGNED_NAME}</span>
               </span>
               <span className="zd-district-row__pop zd-num">{formatInt(state.unassigned.pop)}</span>
@@ -327,7 +325,7 @@ export function DistrictPicker({ state, dispatch, readOnly = false }: DistrictPi
         <>
           {feasibility && (
             <div
-              className={`zd-feasibility ${feasibility.feasible ? 'zd-feasibility--ok' : 'zd-feasibility--bad'}`}
+              className={`zd-note zd-feasibility ${feasibility.feasible ? 'zd-note--success' : 'zd-note--warn'}`}
               role="status"
               data-testid="group-feasibility"
             >

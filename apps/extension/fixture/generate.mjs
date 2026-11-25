@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 /**
  * Generates the synthetic test fixtures (real @zd/bundle binary format):
- *   fixture/data/<ST>/...      manifest.json, attrs.<sha>.bin.gz, <county>.<sha>.topo.json.gz
+ *   fixture/data/<ST>/...      manifest.json, attrs.<sha>.bin.gz, <county>.<sha>.topo.json.gz,
+ *                              points.<sha>.bin.gz (one point per block: the square's centre, like
+ *                              the Census internal point; 2·n Int32 LE, lon then lat, 1e-6 degrees),
+ *                              towns.<sha>.bin.gz, names.<sha>.json.gz and outlines.<sha>.json.gz
  *   fixture/www/plan.json      "NY": the fake DRA page's default plan
  *   fixture/www/plan-vt.json   "VT": the two-way-trade plan (fake page ?plan=vt)
  *
@@ -38,7 +41,7 @@ function encodeBitset(list, members) {
 }
 
 /**
- * cfg: { state, fips, counties: [left, right], W, H, P, X0, Y0, D, ND, seed,
+ * cfg: { state, fips, counties: [left, right], countyNames: [left, right], W, H, P, X0, Y0, D, ND, seed,
  *        district(px, py, PW, PH) -> d, pop(rand, x, y, d) -> { pop, popA },
  *        split?: true (NY's committed split), adjust?(cells) (final population tweaks), planFile }
  */
@@ -186,6 +189,29 @@ function generate(cfg) {
     return { file, sha256: h, bytes: gz.length };
   };
   const attrsRef = writeRef((h) => `attrs.${h}.bin.gz`, attrs);
+  // Block points (BundleManifest.points), in block order.
+  const pts = new Int32Array(2 * n);
+  for (const c of sorted) {
+    pts[2 * c.index] = Math.round((X0 + (c.x + 0.5) * D) * 1e6);
+    pts[2 * c.index + 1] = Math.round((Y0 - (c.y + 0.5) * D) * 1e6);
+  }
+  const pointsRef = writeRef((h) => `points.${h}.bin.gz`, Buffer.from(pts.buffer, pts.byteOffset, pts.byteLength));
+  // Two towns across the top half of the grid. The bottom half has no town.
+  const townOf = Uint32Array.from(sorted, (c) => c.y < H / 2 ? c.county + 1 : 0);
+  const townsRef = writeRef((h) => `towns.${h}.bin.gz`, Buffer.from(townOf.buffer));
+  const names = { counties: cfg.countyNames, towns: ['', 'Westfield town', 'Eastfield town'] };
+  const namesRef = writeRef((h) => `names.${h}.json.gz`, Buffer.from(JSON.stringify(names)));
+  // County outlines (BundleManifest.outlines): each county is one half of the grid, a rectangle.
+  const outlines = {
+    type: 'FeatureCollection',
+    features: COUNTIES.map((fips, ci) => {
+      const x0 = X0 + (ci * W * D) / 2;
+      const x1 = X0 + ((ci + 1) * W * D) / 2;
+      const y1 = Y0 - H * D;
+      return { type: 'Feature', id: ci, properties: { fips }, geometry: { type: 'Polygon', coordinates: [[[x0, Y0], [x1, Y0], [x1, y1], [x0, y1], [x0, Y0]]] } };
+    }),
+  };
+  const outlinesRef = writeRef((h) => `outlines.${h}.json.gz`, Buffer.from(JSON.stringify(outlines)));
   const counties = COUNTIES.map((fips, ci) => {
     const members = sorted.filter((c) => c.county === ci);
     const arcs = members.map(ring);
@@ -205,6 +231,10 @@ function generate(cfg) {
     precinctKind: 'vtd',
     attribution: 'Synthetic test fixture (no real data).',
     attrs: attrsRef,
+    points: pointsRef,
+    towns: { ...townsRef, count: names.towns.length - 1, kind: 'county-subdivision' },
+    names: namesRef,
+    outlines: outlinesRef,
     counties,
   };
   writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
@@ -236,6 +266,7 @@ generate({
   state: 'NY',
   fips: '36',
   counties: ['36901', '36903'], // left / right half
+  countyNames: ['West County', 'East County'],
   W: 48,
   H: 32,
   P: 4,
@@ -266,6 +297,7 @@ generate({
   state: 'VT',
   fips: '50',
   counties: ['50901', '50903'],
+  countyNames: ['West County', 'East County'],
   W: 32,
   H: 16,
   P: 4,

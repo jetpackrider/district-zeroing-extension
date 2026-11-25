@@ -60,11 +60,15 @@ export class EngineClient {
     return this.pending.size > 0;
   }
 
-  request<T extends WorkerResponse>(req: WorkerRequestBody, onProgress?: (done: number, total: number) => void): Promise<T> {
+  /**
+   * `transfer`: buffers to move to the worker instead of copying (e.g. the area mask, see
+   * WorkerRequest `area`). They are unusable here afterwards, so pass buffers of copies.
+   */
+  request<T extends WorkerResponse>(req: WorkerRequestBody, onProgress?: (done: number, total: number) => void, transfer: Transferable[] = []): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (r: WorkerResponse) => void, reject, onProgress });
-      this.worker.postMessage({ ...req, id } as WorkerRequest);
+      this.worker.postMessage({ ...req, id } as WorkerRequest, transfer);
     });
   }
 

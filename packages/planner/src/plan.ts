@@ -1,4 +1,5 @@
 import type {
+  AreaPreference,
   Assignment,
   BorderSolver,
   CostWeights,
@@ -344,7 +345,124 @@ export interface PlanOptions {
   onRepairDebug?: (message: string) => void;
 }
 
+/**
+ * Plans for a group of districts or the whole map (GroupSolveRequest). With an area
+ * (GroupSolveRequest.area, see AreaPreference) the plans are made as described at planInArea;
+ * without one, exactly as before areas existed.
+ */
 export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): PlannerResult {
+  return req.area ? planInArea(req, req.area, options) : planAnywhere(req, options);
+}
+
+/** How many moved blocks lie outside the area (SolutionStats.outsideArea). */
+function outsideCount(transfers: readonly Transfer[], inside: Uint8Array): number {
+  let outside = 0;
+  for (const t of transfers) for (const b of t.blocks) if (inside[b] !== 1) outside++;
+  return outside;
+}
+
+/** Each plan with its stats.outsideArea filled in. */
+function withOutsideCounts(solutions: Solution[], inside: Uint8Array): Solution[] {
+  return solutions.map((s) => ({ ...s, stats: { ...s.stats, outsideArea: outsideCount(s.transfers, inside) } }));
+}
+
+/**
+ * Plans with an area the user marked (AreaPreference). Feasibility is about populations, so the
+ * area does not change it; it changes which blocks may move.
+ *  - First every block outside the area is locked (merged with `req.locked`, the painted blocks
+ *    of re-plan from here) and the group is planned as usual: those plans move only blocks inside.
+ *  - 'only' stops there. When that finds no plan, the group is planned once more without the
+ *    area, only to tell whether the area is the reason, and the message says so.
+ *  - 'prefer' also plans without the area whenever the first pass found fewer plans than the
+ *    requested number (PLAN_KINDS.length distinct plans: kinds that fail, or that agree on the same
+ *    plan, both leave places empty), and fills the empty places with the new plans that differ from
+ *    the inside ones, fewest outside blocks first.
+ * Every plan carries stats.outsideArea. Progress runs on across both passes and finishes at
+ * done === total.
+ */
+function planInArea(req: GroupSolveRequest, area: AreaPreference, options: PlanOptions): PlannerResult {
+  const t0 = now();
+  const { graph } = req;
+  const { inside } = area;
+  const lengthError = !(inside instanceof Uint8Array) || inside.length !== graph.n
+    ? 'The area does not match the block graph.'
+    : req.locked && req.locked.length !== graph.n ? 'Locked mask length does not match the block graph.' : undefined;
+  if (lengthError) {
+    return {
+      status: 'error', solutions: [], message: lengthError, elapsedMs: now() - t0,
+      feasibility: { feasible: false, excess: 0, suggestAdd: [] }, interaction: { nodes: [], edges: [] }, failures: [], repairCalls: 0,
+    };
+  }
+  // Progress: the second pass carries on from where the first stopped, and neither reports
+  // done === total until both are over.
+  let offset = 0;
+  let reported = 0;
+  const onProgress = req.onProgress && ((done: number, total: number) => {
+    reported = offset + done;
+    req.onProgress!(offset + done, offset + total + 1);
+  });
+  const finish = (result: PlannerResult): PlannerResult => {
+    req.onProgress?.(reported, reported);
+    return { ...result, elapsedMs: now() - t0 };
+  };
+  const plain: GroupSolveRequest = { ...req, area: undefined, onProgress };
+  const lock = req.locked ? req.locked.slice() : new Uint8Array(graph.n);
+  for (let b = 0; b < graph.n; b++) if (inside[b] !== 1) lock[b] = 1;
+
+  const within = planAnywhere({ ...plain, locked: lock }, options);
+  within.solutions = withOutsideCounts(within.solutions, inside);
+  // Errors, an unbalanced group and an already-zero group do not depend on where blocks may move.
+  if (within.status === 'error' || within.status === 'group-unbalanced' || within.status === 'already-zero') return finish(within);
+  if (area.mode === 'only') {
+    if (within.solutions.length) return finish(within);
+    offset = reported;
+    // Nothing inside. Is the area the reason? Plan without it to find out.
+    const anywhere = planAnywhere(plain, options);
+    if (!anywhere.solutions.length) return finish(within);
+    return finish({
+      ...within,
+      message: 'No plan moves only blocks inside the area; there are plans that move blocks outside it. Choose Prefer to see them, or mark a larger area.',
+      repairCalls: within.repairCalls + anywhere.repairCalls,
+    });
+  }
+
+  // Prefer: the requested number of plans is one per kind. Fewer inside (kinds that failed, or
+  // kinds that found the same plan) leaves places that plans going outside fill (AreaPreference).
+  // Counting only failed kinds missed the second case: one inside plan, and the outside ones dropped.
+  if (within.solutions.length >= PLAN_KINDS.length) return finish(within);
+  offset = reported;
+  const anywhere = planAnywhere(plain, options);
+  const seen = new Set(within.solutions.map((s) => effectKey(s.transfers)));
+  const extra = withOutsideCounts(anywhere.solutions, inside).filter((s) => {
+    const key = effectKey(s.transfers);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  // Inside first, then fewest outside blocks; within a count, the planner's own order.
+  const solutions = [...within.solutions, ...extra]
+    .sort((a, b) => a.stats.outsideArea! - b.stats.outsideArea! ||
+      Number(!!a.stats.longReach) - Number(!!b.stats.longReach) || a.stats.cost - b.stats.cost)
+    .slice(0, Math.max(PLAN_KINDS.length, within.solutions.length));
+  const failures = [...within.failures, ...anywhere.failures];
+  const repairCalls = within.repairCalls + anywhere.repairCalls;
+  if (!solutions.length) return finish({ ...anywhere, failures, repairCalls });
+  // The interaction view and message of the pass the first plan comes from.
+  const lead = within.solutions.length ? within : anywhere;
+  const note = within.solutions.length ? undefined
+    : `No plan moves only blocks inside the area; ${solutions.length === 1 ? 'this plan moves' : 'these plans move'} some blocks outside it.`;
+  return finish({
+    ...lead,
+    status: 'ok',
+    solutions,
+    message: note ? (lead.message ? `${note} ${lead.message}` : note) : lead.message,
+    failures,
+    repairCalls,
+  });
+}
+
+/** planGroup with no area: every block that is not locked may move. */
+function planAnywhere(req: GroupSolveRequest, options: PlanOptions = {}): PlannerResult {
   const t0 = now();
   const emptyInteraction: InteractionGraph = { nodes: [], edges: [] };
   const fail = (status: GroupSolveResult['status'], message: string, extra?: Partial<GroupSolveResult>): PlannerResult => ({
@@ -364,6 +482,11 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
     const k = targets.numDistricts;
     if (!(k >= 1) || req.assignment.length !== graph.n) return fail('error', 'Assignment length does not match the block graph.');
     if (req.locked && req.locked.length !== graph.n) return fail('error', 'Locked mask length does not match the block graph.');
+    if (req.goals) {
+      for (const g of Object.values(req.goals)) {
+        if (g !== undefined && g !== -1 && g !== 0 && g !== 1) return fail('error', `Invalid district goal: ${String(g)}.`);
+      }
+    }
     const baseWeights = resolveWeights(req.weights);
     const solver: CompactSolver = req.solver;
 
@@ -381,13 +504,29 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
 
     if (!analysis.feasible) return fail('group-unbalanced', analysis.message, base);
 
-    const hi = extraSlot(targets);
-    const supply = new Map<number, number>();
-    for (const d of members) supply.set(d, pops[d] - targets.q);
-    const allZero = members.every((d) => supply.get(d)! >= 0 && supply.get(d)! <= hi);
-    if (allZero) return { status: 'already-zero', solutions: [], message: 'Every selected district is already at zero.', elapsedMs: now() - t0, failures: [], repairCalls: 0, ...base };
-
     const inGroup = new Set(members);
+    const hi = extraSlot(targets);
+    const goalOf = (d: number) => (inGroup.has(d) ? req.goals?.[d] : undefined);
+    const targetBase = (d: number) => {
+      const g = goalOf(d);
+      return g !== undefined ? targets.draTarget + g : targets.q;
+    };
+    const memberHi = new Map<number, 0 | 1>();
+    const memberHiArr = new Uint8Array(k + 1);
+    memberHiArr.fill(hi);
+    for (const d of members) {
+      const mh: 0 | 1 = goalOf(d) !== undefined ? 0 : hi;
+      memberHi.set(d, mh);
+      memberHiArr[d] = mh;
+    }
+    const supply = new Map<number, number>();
+    for (const d of members) supply.set(d, pops[d] - targetBase(d));
+    const allZero = members.every((d) => supply.get(d)! >= 0 && supply.get(d)! <= memberHi.get(d)!);
+    if (allZero) {
+      const hasGoal = members.some((d) => goalOf(d) !== undefined);
+      return { status: 'already-zero', solutions: [], message: hasGoal ? 'Every selected district is already at its goal.' : 'Every selected district is already at zero.', elapsedMs: now() - t0, failures: [], repairCalls: 0, ...base };
+    }
+
     const absorbers = new Map<number, number>();
     /** Absorbers with no target: Unassigned (0) when the request allows it. */
     const free = new Set<number>();
@@ -482,7 +621,7 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
       for (let round = 0; round < MAX_ROUNDS; round++) {
         const roundPops = round === 0 ? pops : districtPopulations(graph, cur, k);
         const roundSupply = new Map<number, number>();
-        for (const d of members) roundSupply.set(d, roundPops[d] - targets.q);
+        for (const d of members) roundSupply.set(d, roundPops[d] - targetBase(d));
         const roundAbsorbers = new Map<number, number>();
         for (const o of absorbers.keys()) roundAbsorbers.set(o, free.has(o) ? 0 : roundPops[o] - targets.q);
         const roundCurves: CurveMap = round === 0 ? firstCurves : refreshCurves(activeSolver, prevCurves!, prevUsed, cur, curLock);
@@ -502,7 +641,7 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
         let lastStuck: RepairStuck | undefined;
         let repairFailures = 0;
         for (let attempt = 0; attempt <= retryThrough && !success; attempt++) {
-          const flow = planFlow({ members, supply: roundSupply, hi, borders, curves: roundCurves, absorbers: roundAbsorbers, free, caps, params, slackCost: SLACK_COST });
+          const flow = planFlow({ members, supply: roundSupply, hi, memberHi, borders, curves: roundCurves, absorbers: roundAbsorbers, free, caps, params, slackCost: SLACK_COST });
           lastBorders = flow.borders;
           lastUnmetFlow = flow.unmet;
           // The curve can miss a small amount entirely. Repair may still place it
@@ -518,8 +657,8 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
           let roundSteps = out.steps;
           if (repairNow) {
             // Stage 2: place what the first stage left out or missed (two-way trades, chains, cycles).
-            const rho = districtPopulations(graph, out.final, k).map((p) => p - targets.q);
-            const needsRepair = members.some((d) => rho[d] < 0 || rho[d] > hi);
+            const rho = districtPopulations(graph, out.final, k).map((p, d) => p - targetBase(d));
+            const needsRepair = members.some((d) => rho[d] < 0 || rho[d] > memberHiArr[d]);
             if (needsRepair) {
               const ver = new Map<number, string>();
               const bump = (t: Transfer) => {
@@ -539,6 +678,7 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
                 lock: out.lock,
                 rho,
                 hi,
+                memberHi: memberHiArr,
                 selected,
                 absorber,
                 adjacency: repairAdjacency,
@@ -572,6 +712,7 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
               allowOutsideAbsorb: req.allowOutsideAbsorb,
               absorbers: req.absorbers,
               includeUnassigned: req.includeUnassigned,
+              goals: req.goals,
               transfers: [...steps, ...roundSteps].map((st) => st.transfer),
               locked: req.locked,
             });

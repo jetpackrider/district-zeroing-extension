@@ -16,6 +16,7 @@ import {
   getDeviationTone,
   getDistrictColor,
   getSelectedDistrictIndexes,
+  isAtGoal,
   isDeviationZeroed,
   isUnassigned,
 } from '../format';
@@ -63,9 +64,14 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
   const showMiniMap = mapMode === 'mini' || state.mapMode === 'mini';
 
   // Live deviation tracking for every selected district
+  const oneGoal = state.scope.mode === 'one' ? state.scope.goal : undefined;
   const selectedIndexes = getSelectedDistrictIndexes(state.scope, state.districts, state.lockedDistricts);
   const trackedDistricts = state.districts.filter((d) => selectedIndexes.includes(d.index));
-  const zeroedTracked = trackedDistricts.filter((d) => isDeviationZeroed(d.deviation, state.map)).length;
+  const zeroedTracked = trackedDistricts.filter((d) =>
+    state.scope.mode === 'one' && d.index === state.scope.district
+      ? isAtGoal(d.deviation, oneGoal, state.map)
+      : isDeviationZeroed(d.deviation, state.map),
+  ).length;
 
   // Identify districts currently between legs of an incomplete two-way trade so live deviations
   // do not look alarming while Leg 2 is still pending.
@@ -141,8 +147,8 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
           key={step.id}
           type="button"
           className={[
-            'zd-outline-step',
-            isCurrent ? 'zd-outline-step--current' : '',
+            'zd-btn zd-list__row zd-outline-step',
+            isCurrent ? 'zd-list__row--selected' : '',
             step.status === 'done' ? 'zd-outline-step--done' : '',
           ]
             .filter(Boolean)
@@ -156,11 +162,11 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
               {icon}
             </span>
             <span className="zd-outline-step__idx zd-num">{globalIndex + 1}.</span>
-            <span className="zd-mono" style={{ fontSize: 11.5 }}>
+            <span className="zd-mono zd-text-sm">
               {step.precinctId}
             </span>
           </span>
-          <span className="zd-num" style={{ fontSize: 11.5, color: 'var(--zd-text-secondary)' }}>
+          <span className="zd-num zd-text-sm zd-secondary">
             {step.wholePrecinct
               ? `Whole precinct · ${formatInt(stepPop)}`
               : `${stepDoneBlocks}/${step.blocks.length} blks · ${formatInt(stepPop)}`}
@@ -170,7 +176,7 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
     });
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+    <div className="zd-walkthrough">
       <div className="zd-body">
         {/* Header with live deviations for all selected districts */}
         <section className="zd-card zd-wt-header" aria-label="Walkthrough progress and live deviations">
@@ -179,10 +185,12 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
               <h2 className="zd-wt-title zd-num">
                 Step {steps.length > 0 ? clampedIndex + 1 : 0} of {steps.length}
               </h2>
-              <span className="zd-num" style={{ fontSize: 11.5, color: 'var(--zd-text-muted)' }}>
+              <span className="zd-num zd-text-sm zd-muted">
                 {doneStepsCount} of {steps.length} precincts done ·{' '}
                 {liveTicking
-                  ? `${zeroedTracked}/${trackedDistricts.length} selected zeroed`
+                  ? oneGoal !== undefined
+                    ? `${zeroedTracked}/${trackedDistricts.length} at ${formatSigned(oneGoal)}`
+                    : `${zeroedTracked}/${trackedDistricts.length} selected zeroed`
                   : 'live tracking off'}
               </span>
             </div>
@@ -196,23 +204,26 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
             </button>
           </div>
 
-          <div className="zd-progress-track" style={{ marginTop: 0 }}>
+          <div className="zd-progress-track">
             <div className="zd-progress-fill" style={{ width: `${stepPct}%` }} />
           </div>
 
           {trackedDistricts.length > 0 && (
             <div className="zd-live-chips" aria-label="Live selected district deviations">
               {trackedDistricts.map((d) => {
-                const tone = getDeviationTone(d.deviation, state.map);
+                const isGoalTarget = state.scope.mode === 'one' && oneGoal !== undefined && d.index === state.scope.district;
+                const tone = isGoalTarget
+                  ? (d.deviation === oneGoal ? 'zero' : d.deviation > oneGoal ? 'over' : 'under')
+                  : getDeviationTone(d.deviation, state.map);
                 const midTrade = tone !== 'zero' ? midTradeByDistrict.get(d.index) : undefined;
                 const isMidTrade = Boolean(midTrade);
                 return (
                   <span
                     key={d.index}
                     className={[
-                      'zd-live-chip',
-                      tone === 'zero' ? 'zd-live-chip--zero' : '',
-                      isMidTrade ? 'zd-live-chip--mid-trade' : '',
+                      'zd-pill zd-num',
+                      tone === 'zero' ? 'zd-pill--zero' : '',
+                      isMidTrade ? 'zd-pill--twoway' : '',
                     ]
                       .filter(Boolean)
                       .join(' ')}
@@ -224,8 +235,8 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
                     )}
                     <span>{formatDistrictShort(d.index, state.districts)}:</span>
                     <strong
-                      className={`zd-dev zd-dev--inline ${
-                        isMidTrade ? 'zd-dev--mid-trade' : `zd-dev--${tone}`
+                      className={`zd-pill zd-num zd-pill--inline ${
+                        isMidTrade ? 'zd-pill--twoway' : `zd-pill--${tone}`
                       }`}
                     >
                       {formatSigned(d.deviation)}
@@ -243,7 +254,7 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
           )}
 
           {activeMidTrades.length > 0 && (
-            <div className="zd-mid-trade-note" role="status" data-testid="mid-trade-status">
+            <div className="zd-note zd-note--twoway" role="status" data-testid="mid-trade-status">
               {activeMidTrades.map((trade) => {
                 const l1From = formatDistrictShort(trade.leg1.from, state.districts);
                 const l1To = formatDistrictShort(trade.leg1.to, state.districts);
@@ -271,9 +282,9 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
 
         {/* Live ticking off notice (hidden once final check is shown) */}
         {!liveTicking && !finalCheck && (
-          <div className="zd-callout zd-callout--info" role="status" data-testid="live-ticking-off">
-            <p className="zd-callout__title">Live ticking is off</p>
-            <p className="zd-callout__text">
+          <div className="zd-note zd-note--info" role="status" data-testid="live-ticking-off">
+            <p className="zd-note__title">Live ticking is off</p>
+            <p className="zd-note__text">
               Block edits cannot be detected automatically in this mode. Paint the listed blocks in
               DRA, then use <strong>Next</strong> to advance by hand.
             </p>
@@ -282,13 +293,13 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
 
         {/* Stray edit warning */}
         {strayEdits.length > 0 && (
-          <div className="zd-callout zd-callout--warn" role="alert" data-testid="stray-edits-banner">
-            <p className="zd-callout__title">
+          <div className="zd-note zd-note--warn" role="alert" data-testid="stray-edits-banner">
+            <p className="zd-note__title">
               {strayEdits.length === 1
                 ? '1 stray edit detected outside this plan'
                 : `${strayEdits.length} stray edits detected outside this plan`}
             </p>
-            <p className="zd-callout__text">
+            <p className="zd-note__text">
               Your DRA plan changed outside the highlighted blocks. You can undo in DRA or re-solve
               the remaining borders from your current map.
             </p>
@@ -317,35 +328,40 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
         {/* Final check result (true = confirmed in DRA, null = CSV expected result, false = off target) */}
         {finalCheck && (
           <section
-            className={`zd-callout ${
+            className={`zd-note ${
               finalCheck.ok === true
-                ? 'zd-callout--ok'
+                ? 'zd-note--success'
                 : finalCheck.ok === null
-                  ? 'zd-callout--info'
-                  : 'zd-callout--warn'
+                  ? 'zd-note--info'
+                  : 'zd-note--warn'
             }`}
             role="status"
             data-testid="final-check-card"
           >
-            <p className="zd-callout__title">
+            <p className="zd-note__title">
               {finalCheck.ok === true
                 ? '✓ Final check passed — confirmed against DRA'
                 : finalCheck.ok === null
                   ? 'Steps finished — expected result (not verified in DRA)'
                   : 'Final check found remaining deviation'}
             </p>
-            <p className="zd-callout__text">
+            <p className="zd-note__text">
               {finalCheck.ok === true
-                ? 'All affected districts match the expected zero-deviation target in DRA.'
+                ? oneGoal !== undefined
+                  ? `District reached the ${formatSigned(oneGoal)} goal in DRA.`
+                  : 'All affected districts match the expected zero-deviation target in DRA.'
                 : finalCheck.ok === null
                   ? 'Live checking is unavailable in CSV mode, so DRA was not re-read. Below is the plan’s expected outcome once every step is painted — check your district totals in DRA to confirm.'
                   : 'Re-read from DRA shows at least one district is still off target. Re-plan from here to finish.'}
             </p>
             {finalCheck.deviations.length > 0 && (
-              <div className="zd-dev-changes" style={{ marginTop: 6 }}>
+              <div className="zd-dev-changes">
                 {finalCheck.deviations.map((dev) => {
                   const swatch = getDistrictColor(dev.district, state.districts);
-                  const afterTone = getDeviationTone(dev.after, state.map);
+                  const isGoalTarget = state.scope.mode === 'one' && oneGoal !== undefined && dev.district === state.scope.district;
+                  const afterTone = isGoalTarget
+                    ? (dev.after === oneGoal ? 'zero' : dev.after > oneGoal ? 'over' : 'under')
+                    : getDeviationTone(dev.after, state.map);
                   return (
                     <div key={dev.district} className="zd-dev-change">
                       <span className="zd-dev-change__name">
@@ -355,11 +371,11 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
                         <span>{formatDistrictName(dev.district, state.districts)}:</span>
                       </span>
                       <span className="zd-dev-change__vals">
-                        <span style={{ color: 'var(--zd-text-muted)' }}>
+                        <span className="zd-muted">
                           {formatSigned(dev.before)}
                         </span>
                         <span aria-hidden="true">→</span>
-                        <span className={`zd-dev zd-dev--inline zd-dev--${afterTone}`}>
+                        <span className={`zd-pill zd-num zd-pill--inline zd-pill--${afterTone}`}>
                           {formatSigned(dev.after)}
                           {afterTone === 'zero' && finalCheck.ok !== null ? ' ✓' : ''}
                         </span>
@@ -370,7 +386,7 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
               </div>
             )}
             {finalCheck.ok === false && (
-              <div style={{ marginTop: 6 }}>
+              <div>
                 <button
                   type="button"
                   className="zd-btn zd-btn--sm zd-btn--warn"
@@ -394,12 +410,12 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
 
         {/* Two-way trade up-front guidance when the active step belongs to a two-way border */}
         {activeTwoWay && activeLeg && !finalCheck && (
-          <div className="zd-callout zd-callout--twoway" role="status" data-testid="twoway-trade-notice">
-            <p className="zd-callout__title">
+          <div className="zd-note zd-note--twoway" role="status" data-testid="twoway-trade-notice">
+            <p className="zd-note__title">
               Two-way trade: {formatDistrictName(activeTwoWay.leg1.from, state.districts)} ⇄{' '}
               {formatDistrictName(activeTwoWay.leg1.to, state.districts)} · Leg {activeLeg} of 2
             </p>
-            <p className="zd-callout__text zd-num">
+            <p className="zd-note__text zd-num">
               {formatDistrictShort(activeTwoWay.leg1.from, state.districts)} →{' '}
               {formatDistrictShort(activeTwoWay.leg1.to, state.districts)}:{' '}
               <strong>{formatInt(activeTwoWay.leg1.people)}</strong> people, then{' '}
@@ -412,21 +428,21 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
               <strong>{formatInt(activeTwoWay.netPeople)}</strong>).
             </p>
             {activeLeg === 1 ? (
-              <p className="zd-callout__text">
+              <p className="zd-note__text">
                 The small net shift couldn&apos;t be moved one way here, so this border swaps blocks
                 in both directions. <strong>Paint Leg 1 before Leg 2</strong> so the border stays
                 contiguous and matches the Leg 2 blocks. Between the two legs, both districts will
                 temporarily look further from zero until Leg 2 cancels the overshoot.
               </p>
             ) : activeTwoWay.leg1.done ? (
-              <p className="zd-callout__text">
+              <p className="zd-note__text">
                 Leg 1 is complete — painting Leg 2 ({formatDistrictShort(activeTwoWay.leg2.from, state.districts)} →{' '}
                 {formatDistrictShort(activeTwoWay.leg2.to, state.districts)}) finishes the swap and
                 brings both districts back on target.
               </p>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                <p className="zd-callout__text">
+              <div className="zd-stack">
+                <p className="zd-note__text">
                   <strong>Order matters:</strong> Finish Leg 1 (
                   {formatDistrictShort(activeTwoWay.leg1.from, state.districts)} →{' '}
                   {formatDistrictShort(activeTwoWay.leg1.to, state.districts)}) before painting Leg
@@ -466,10 +482,10 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
                 )}
                 <span>{toName}</span>
                 {activeLeg && (
-                  <span className="zd-twoway-pill">Leg {activeLeg}/2</span>
+                  <span className="zd-pill zd-pill--twoway">Leg {activeLeg}/2</span>
                 )}
               </span>
-              <span className="zd-step-precinct" title={`Precinct ${activeStep.precinctId}`}>
+              <span className="zd-pill zd-mono" title={`Precinct ${activeStep.precinctId}`}>
                 Precinct {activeStep.precinctId}
               </span>
             </div>
@@ -515,9 +531,9 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
             </p>
 
             {activeStep.status === 'awaiting-commit' && (
-              <div className="zd-callout zd-callout--ok" role="status" data-testid="commit-reminder">
-                <p className="zd-callout__title">✓ Click DRA&apos;s checkmark to commit</p>
-                <p className="zd-callout__text">
+              <div className="zd-note zd-note--success" role="status" data-testid="commit-reminder">
+                <p className="zd-note__title">✓ Click DRA&apos;s checkmark to commit</p>
+                <p className="zd-note__text">
                   All blocks in this precinct are painted. Commit your shattered precinct in DRA
                   before moving to the next step.
                 </p>
@@ -537,21 +553,21 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
             {/* Per-block ticks */}
             {activeStep.blocks.length > 0 && (
               <div>
-                <div className="zd-section-head" style={{ marginBottom: 5 }}>
+                <div className="zd-section-head">
                   <span className="zd-section-title">
                     {activeStep.wholePrecinct ? 'Precinct blocks' : erasing ? 'Blocks to erase' : 'Blocks to paint'}
                   </span>
-                  <span className="zd-num" style={{ fontSize: 11.5, color: 'var(--zd-text-muted)' }}>
+                  <span className="zd-num zd-text-sm zd-muted">
                     {activeStepDoneBlocks}/{activeStep.blocks.length} done ·{' '}
                     {formatInt(activeStepTotalPeople)} people
                   </span>
                 </div>
 
-                <ul className="zd-block-list" aria-label="Blocks in current step">
+                <ul className="zd-list" aria-label="Blocks in current step">
                   {activeStep.blocks.map((block) => (
                     <li
                       key={block.geoid}
-                      className={`zd-block-item${block.done ? ' zd-block-item--done' : ''}`}
+                      className={`zd-list__row zd-block-item${block.done ? ' zd-block-item--done' : ''}`}
                       data-testid={`walkthrough-block-${block.number}`}
                     >
                       <span className="zd-block-item__left">
@@ -576,12 +592,12 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
 
         {/* Steps grouped by border, then precinct — clickable to jump */}
         <section className="zd-outline" aria-label="All walkthrough steps by border">
-          <div className="zd-section-head" style={{ marginBottom: 0, paddingLeft: 2 }}>
+          <div className="zd-section-head">
             <h3 className="zd-section-title">
               Steps by border ({outlineGroups.length}{' '}
               {outlineGroups.length === 1 ? 'border' : 'borders'})
             </h3>
-            <span style={{ fontSize: 11, color: 'var(--zd-text-muted)', whiteSpace: 'nowrap' }}>
+            <span className="zd-caption">
               Click to jump
             </span>
           </div>
@@ -599,7 +615,7 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
               return (
                 <div
                   key={group.key}
-                  className="zd-border-group zd-border-group--twoway"
+                  className="zd-list zd-border-group--twoway"
                   data-testid={`outline-twoway-${trade.a}-${trade.b}`}
                 >
                   <div className="zd-border-group__head zd-border-group__head--twoway">
@@ -613,9 +629,9 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
                         <span className="zd-swatch" style={{ backgroundColor: l1ToColor }} aria-hidden="true" />
                       )}
                       <span>{formatDistrictName(trade.leg1.to, state.districts)}</span>
-                      <span className="zd-twoway-pill">2-way</span>
+                      <span className="zd-pill zd-pill--twoway">2-way</span>
                     </span>
-                    <span className="zd-num" style={{ color: 'var(--zd-text-muted)', fontWeight: 500 }}>
+                    <span className="zd-num zd-muted">
                       net {formatInt(trade.netPeople)} · {totalDone}/{totalSteps}
                     </span>
                   </div>
@@ -648,7 +664,7 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
             return (
               <div
                 key={group.key}
-                className={`zd-border-group${run.twoWay ? ' zd-border-group--twoway' : ''}`}
+                className={`zd-list${run.twoWay ? ' zd-border-group--twoway' : ''}`}
               >
                 <div className="zd-border-group__head">
                   <span className="zd-step-border">
@@ -662,12 +678,12 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
                     )}
                     <span>{formatDistrictName(run.to, state.districts)}</span>
                     {run.twoWay && (
-                      <span className="zd-twoway-pill">
+                      <span className="zd-pill zd-pill--twoway">
                         2-way · Leg {run.twoWay.leg}/2
                       </span>
                     )}
                   </span>
-                  <span className="zd-num" style={{ color: 'var(--zd-text-muted)', fontWeight: 500 }}>
+                  <span className="zd-num zd-muted">
                     {groupDone}/{run.items.length}
                   </span>
                 </div>
@@ -722,7 +738,6 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
           <button
             type="button"
             className="zd-btn zd-btn--ghost zd-btn--sm"
-            style={{ alignSelf: 'center' }}
             onClick={() => dispatch({ type: 'walkthrough-replan' })}
           >
             Re-plan from here

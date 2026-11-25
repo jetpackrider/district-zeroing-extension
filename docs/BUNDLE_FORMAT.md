@@ -6,7 +6,7 @@ A bundle lives at `<root>/<STATE>/manifest.json`, where `<STATE>` is the upperca
 
 The manifest is UTF-8 JSON with the fields of `BundleManifest` in [packages/contracts/src/bundle.ts](../packages/contracts/src/bundle.ts). It also carries a `sources` object with URL or local filename and SHA-256 for each build input. Readers can ignore unfamiliar fields. `format` is 1. `counties` is ordered by ascending five-digit county FIPS.
 
-Each file record provides `file`, `bytes`, and a lowercase hexadecimal `sha256`. Length and hash refer to the **compressed bytes**. The same hash appears in the filename. Filenames are `attrs.<sha256>.bin.gz` and `<countyFips>.<sha256>.topo.json.gz`. County records also include `fips` and `features`. The manifest is plain text.
+Each file record provides `file`, `bytes`, and a lowercase hexadecimal `sha256`. Length and hash refer to the **compressed bytes**. The same hash appears in the filename. Filenames are `attrs.<sha256>.bin.gz` and `<countyFips>.<sha256>.topo.json.gz`, plus the optional sidecars `water.<sha256>.bin.gz`, `towns.<sha256>.bin.gz`, `points.<sha256>.bin.gz`, `names.<sha256>.json.gz` and `outlines.<sha256>.json.gz` described at the end. County records also include `fips` and `features`. The manifest is plain text.
 
 ## Attributes
 
@@ -138,3 +138,106 @@ attributes. On existing bundles, `build.py towns [STATE ...]` writes the sidecar
 manifest using the block order from the existing attributes. `build.py validate-towns [STATE ...]`
 independently recomputes the sidecar and checks its manifest and hash without reading geometry.
 Both commands cover all 51 bundles when passed no state codes.
+
+## Names sidecar
+
+The optional `names` manifest entry references `names.<sha256>.json.gz` using the same file
+record as `attrs`. The gunzipped UTF-8 JSON object contains `counties` and `towns` string arrays.
+`counties[i]` names county index `i` in the attributes header's `countyFips` order.
+`towns[t]` names town index `t` from the towns sidecar. It has `manifest.towns.count + 1`
+entries, with `towns[0] = ""` for blocks outside towns. With no towns, the array is `[""]`.
+All other names are non-empty. Duplicate town names can occur and keep their separate indexes.
+
+County names come from the 2020 Census county gazetteer's `NAME` column (the full name including
+the legal designation, for example “Suffolk County”). Town labels come from the same place or
+county-subdivision gazetteer records and index assignment as the towns sidecar.
+
+`build.py build` writes the file and `build.py validate` recomputes and checks it. On existing
+bundles, `build.py names [STATE ...]` adds the file and its manifest entry.
+`build.py validate-names [STATE ...]` verifies the names and their index order without loading
+geometry. Both commands cover all 51 bundles when passed no state codes.
+
+## Points sidecar
+
+`points.<sha256>.bin.gz`, referenced by the optional `points` entry of the manifest (same
+`{file, sha256, bytes}` shape as `attrs`). Gunzipped, it is exactly `8 * n` bytes: `2 * n`
+little-endian signed Int32 values in block GEOID order, longitude then latitude for each block
+(`lon0, lat0, lon1, lat1, ...`), in millionths of a degree. Block `i`'s point is at
+`points[2i] / 1e6, points[2i + 1] / 1e6`.
+
+The point is the block's Census internal point, `INTPTLON20` / `INTPTLAT20` in TABBLOCK20. The
+Census places it inside the block polygon (at the centroid when that is inside, otherwise at another
+interior point). The published seven-decimal values are rounded exactly, half to even, to six
+decimals (about 11 cm). Coordinates are NAD83 like the TIGER polygons, which differs from WGS84 by
+a meter or two at most. Alaska's Aleutian blocks west of the antimeridian have positive longitudes.
+
+The extension tests these points against an area the user marks on DRA's map, to tell which blocks
+are inside without loading block shapes. The reader (`decodePoints` in `packages/bundle`) checks the
+compressed file against the manifest, the exact length, and that every value is a real longitude
+(within ±180,000,000) or latitude (within ±90,000,000), and sets `StateBundle.points`. Bundles
+without the entry still load; the bundle then has no `points`. Like the other sidecars the file is
+optional, so one that cannot be read (wrong hash, bad contents) does not fail the state: it loads
+without `points`, with a warning. By default `loadState` reads the file with the state; a reader made
+with `{ points: 'on-demand' }` leaves it to `loadPoints(bundle)`. The extension reads it on demand,
+when an area first needs it, so a state with no area loads exactly as before.
+
+`pipeline/build.py build` writes it and `validate` checks it. On existing bundles,
+`build.py points [STATE ...]` adds it (block order from the existing attributes, which must match
+TIGER's sorted GEOIDs) and names it in the manifest once its checks pass, and
+`build.py validate-points [STATE ...]` checks it without writing. Both cover all 51 bundles when
+passed no state codes and read only the cached TABBLOCK20 ZIPs and the bundle. The checks: the
+manifest entry, size and SHA-256; the exact length; every value equal to the TIGER internal point;
+every point inside its county's bounding box from the county geometry file, widened by 0.02°; and,
+for a fixed sample of 2,000 blocks per state, the point inside the block's unsimplified TIGER
+polygon (allowing only the rounding) and inside its simplified polygon in the county geometry file
+for at least 90% of the sample, with none more than 2 km away. Simplification shaves thin and coastal
+blocks, so across the 51 states up to 5.5% of sampled points lie just outside the simplified shape,
+at most 1.2 km away (Alaska); a wrong block order, swapped axes or wrong units put nearly all of them
+far outside. The 51 files total 46.3 MiB compressed, about 6 bytes per block (New York 1.7 MB, Texas
+4.0 MB).
+
+## Outlines sidecar
+
+`outlines.<sha256>.json.gz`, referenced by the optional `outlines` entry of the manifest (same
+`{file, sha256, bytes}` shape as `attrs`). Gunzipped, it is a compact UTF-8 GeoJSON
+`FeatureCollection` in WGS84 longitude/latitude with exactly one feature per county, in county
+index order: `features[i]` has `id: i` (a number, the index in the attributes header's `countyFips`)
+and `properties: {"fips": countyFips[i]}`, and its geometry is a `Polygon` or `MultiPolygon`.
+Coordinates have at most five decimals (about 1 m). Ring winding is not specified (map renderers
+accept either).
+
+It is for drawing counties and groups of counties (the county cluster finder) on DRA's map without
+loading every county's block geometry. Each outline is the county's land blocks (ALAND20 > 0)
+dissolved into one shape. Holes in that land that no other county's land reaches into, which are
+lakes and ponds of water-only blocks, are filled; a hole that is another county (an independent
+city inside a Virginia county) stays open. Water-only blocks outside the land (open sea, the Great
+Lakes, a river along a county line) are not part of any outline, so a river county line shows as a
+narrow gap. The whole state is then simplified in one mapshaper dataset with Douglas-Peucker at
+50 m on the sphere, so a border two counties share is one arc, simplified and rounded once, and the
+two outlines keep identical edges there. The tolerance doubles (100 m, then 200 m) only when the
+file would exceed 1,000,000 bytes compressed: Alaska's coast uses 100 m, every other state 50 m.
+Rings that rounding makes touch or cross themselves are rebuilt and snapped to the same grid.
+Outlines are for display; contiguity and populations come from the attributes, not from them.
+
+The reader (`decodeOutlines` in `packages/bundle`) checks the feature count, each feature's `id`
+and `fips` against the bundle's counties, the geometry type, closed rings of at least four
+positions, and longitude/latitude ranges. Nothing reads the file with the state: `loadOutlines(bundle)`
+on `BrowserBundleSource` or `NodeBundleSource` reads it when first asked, verifies size and SHA-256,
+caches it (IndexedDB in the browser, under its versioned name, like the other files), and returns the
+`CountyOutlines` collection, or `undefined` when the manifest has no entry. A failed read rejects and
+the next call tries again; the state itself is unaffected.
+
+`build.py build` writes it from the TIGER blocks it already holds and `build.py validate` rebuilds it
+and requires the identical file. On existing bundles, `build.py outlines [STATE ...]` reads the cached
+TABBLOCK20 ZIP (block order and water flags must match the bundle), writes the file and names it in
+the manifest once its checks pass, and `build.py validate-outlines [STATE ...]` checks the file
+without TIGER or mapshaper. Both cover all 51 bundles when passed no state codes. The checks: the
+manifest entry, size and SHA-256; one feature per county with matching `id` and `fips`; valid,
+non-empty polygons with five-decimal coordinates in range; each outline's area (EPSG:5070, as
+`areaM2`) between the sum of its land blocks' `areaM2` and that plus its water-only blocks' area,
+with 3% or 2 km² of slack for simplification; and neighbors overlapping by at most 1e-4 of the
+state's area (the sum of the outline areas minus the area of their union). Across the 51 states the
+worst county is 0.75% from its land area (Lexington city, Virginia), filled lakes add at most 1.9%
+of a state's land area (Maine), and the largest overlap is 3e-9 of a state (Texas). The 51 files
+total 9.2 MB compressed: Alaska 734 KB, Texas 664 KB (254 counties), Virginia 423 KB, New York
+171 KB, the median about 150 KB.

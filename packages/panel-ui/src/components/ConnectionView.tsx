@@ -18,10 +18,10 @@ export function ConnectionView({ state, dispatch }: ConnectionViewProps) {
     return (
       <div className="zd-conn">
         <div className="zd-card" role="status">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+          <div className="zd-conn__status">
             <span className="zd-spinner" aria-hidden="true" />
             <div>
-              <h2 className="zd-conn__title" style={{ marginBottom: 2 }}>
+              <h2 className="zd-conn__title">
                 Connecting to Dave&apos;s Redistricting…
               </h2>
               <p className="zd-conn__desc">Reading the active map and verifying page hooks.</p>
@@ -101,9 +101,9 @@ export function ConnectionView({ state, dispatch }: ConnectionViewProps) {
   if (connection === 'hook-failed') {
     return (
       <div className="zd-conn">
-        <div className="zd-callout zd-callout--warn" role="alert">
-          <p className="zd-callout__title">DRA changed; update pending</p>
-          <p className="zd-callout__text">
+        <div className="zd-note zd-note--warn" role="alert">
+          <p className="zd-note__title">DRA changed; update pending</p>
+          <p className="zd-note__text">
             The live connection to Dave&apos;s Redistricting failed its startup check, likely
             because DRA updated its page bundle. You can still balance your map right now by
             dropping an exported block-assignment CSV below.
@@ -130,15 +130,15 @@ export function ConnectionView({ state, dispatch }: ConnectionViewProps) {
   if (connection === 'unsupported-map') {
     return (
       <div className="zd-conn">
-        <div className="zd-callout zd-callout--warn" role="alert">
-          <p className="zd-callout__title">Suggestions unavailable for this map</p>
-          <p className="zd-callout__text">
+        <div className="zd-note zd-note--warn" role="alert">
+          <p className="zd-note__title">Suggestions unavailable for this map</p>
+          <p className="zd-note__text">
             Zero-deviation balancing supports single-member, equal-population state maps using 2020
             Census shapes. Multi-member, unequal-target, county/city, multi-state, and 2010-shape
             maps are not supported.
           </p>
           {map && (
-            <p className="zd-callout__text zd-num" style={{ marginTop: 4 }}>
+            <p className="zd-note__text zd-num">
               Detected: {map.planName ? `${map.planName} · ` : ''}
               {map.state} · {map.numDistricts} districts · {formatPopField(map.popField)}
             </p>
@@ -160,15 +160,15 @@ export function ConnectionView({ state, dispatch }: ConnectionViewProps) {
   if (connection === 'data-mismatch') {
     return (
       <div className="zd-conn">
-        <div className="zd-callout zd-callout--error" role="alert">
-          <p className="zd-callout__title">Population data mismatch — suggestions disabled</p>
-          <p className="zd-callout__text">
+        <div className="zd-note zd-note--error" role="alert">
+          <p className="zd-note__title">Population data mismatch — suggestions disabled</p>
+          <p className="zd-note__text">
             The extension&apos;s block bundle does not match Dave&apos;s Redistricting&apos;s
             district totals for this map (DRA may have released a new data version). Suggestions are
             paused so no inaccurate block moves are recommended.
           </p>
           {map && (
-            <p className="zd-callout__text zd-num" style={{ marginTop: 4 }}>
+            <p className="zd-note__text zd-num">
               {map.planName ? `${map.planName} · ` : ''}
               {map.state} · Total pop {formatInt(map.totalPop)} · Target {formatInt(map.target)} (
               {formatPopField(map.popField)})

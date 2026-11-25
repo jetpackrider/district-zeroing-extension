@@ -1,4 +1,5 @@
-import { computeTargets } from '@zd/contracts';
+import { computeTargets, isZeroed } from '@zd/contracts';
+import { formatDistrictName, formatSigned } from '../format';
 import type {
   GroupFeasibility,
   PanelAction,
@@ -9,6 +10,10 @@ import type {
   WalkthroughStep,
 } from '@zd/contracts';
 import {
+  AREA_DRAWN_COUNTS,
+  AREA_DRAWN_RING,
+  AREA_VIEW_COUNTS,
+  AREA_VIEW_RING,
   DRAWING_PLAN_SOLUTION,
   GROUP_CHAIN_SOLUTIONS,
   NY_MAP_INFO,
@@ -18,6 +23,7 @@ import {
   buildInteractionForDistricts,
   makeChosenNeighborOptions,
   makeChainWalkthroughSteps,
+  makeMockClusterings,
   makeDrawingWalkthroughSteps,
   makeNYDistricts,
   makeTwoWayWalkthroughSteps,
@@ -30,6 +36,16 @@ export interface MockControllerOptions {
   onAction?: (action: PanelAction) => void;
   /** How long a simulated "Paint this step" takes (default 700 ms). */
   paintDelayMs?: number;
+  /**
+   * After "Draw area", finish the drawing by itself after this many ms (the dev harness), as if the
+   * user had clicked the corners on the map. Absent or 0 = wait for finishAreaDraw() (tests).
+   */
+  areaDrawMs?: number;
+  /**
+   * After "Find clusters", finish the search by itself after this many ms (the dev harness).
+   * Absent or 0 = stay 'finding' until finishClusterFind() (tests).
+   */
+  clusterFindMs?: number;
 }
 
 /**
@@ -43,10 +59,22 @@ export class MockController implements PanelController {
   private onAction?: (action: PanelAction) => void;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private paintDelayMs: number;
+  private areaDrawMs: number;
+  private areaTimer: ReturnType<typeof setTimeout> | null = null;
+  private clusterFindMs: number;
+  private clusterTimer: ReturnType<typeof setTimeout> | null = null;
+  private paintUndoStack: Array<{ stepId: string; stepIndex: number; from: number; to: number; moved: number; label: string }> = [];
+  private settingUndo:
+    | { kind: 'locks'; prevLocks: number[]; prevScope: Scope; afterScope: Scope; label: string }
+    | { kind: 'area'; prevArea: PanelState['area']; label: string }
+    | null = null;
+  private undoLatest: 'paint' | 'setting' | null = null;
 
   constructor(options: MockControllerOptions = {}) {
     this.onAction = options.onAction;
     this.paintDelayMs = options.paintDelayMs ?? 700;
+    this.areaDrawMs = options.areaDrawMs ?? 0;
+    this.clusterFindMs = options.clusterFindMs ?? 0;
     if (options.initialState) {
       this.state = structuredClone(options.initialState);
     } else {
@@ -73,8 +101,27 @@ export class MockController implements PanelController {
 
   setScenario(id: ScenarioId): void {
     this.stopAutoTick();
+    this.stopAreaTimer();
+    this.stopClusterTimer();
+    this.clearAllUndo();
     this.state = SCENARIOS[id].createState();
     this.emit();
+  }
+
+  private clearAllUndo(): void {
+    this.paintUndoStack = [];
+    this.settingUndo = null;
+    this.undoLatest = null;
+  }
+
+  private currentMockUndo(inWalkthrough = Boolean(this.state.walkthrough)): PanelState['undo'] {
+    const settingOk = this.settingUndo !== null && !inWalkthrough;
+    const paintOk = this.paintUndoStack.length > 0;
+    if (this.undoLatest === 'setting' && settingOk) return { kind: 'setting', label: this.settingUndo!.label };
+    if (this.undoLatest === 'paint' && paintOk) return { kind: 'paint', label: this.paintUndoStack[this.paintUndoStack.length - 1].label };
+    if (paintOk) return { kind: 'paint', label: this.paintUndoStack[this.paintUndoStack.length - 1].label };
+    if (settingOk) return { kind: 'setting', label: this.settingUndo!.label };
+    return undefined;
   }
 
   startAutoTick(intervalMs = 1100): void {
@@ -95,6 +142,132 @@ export class MockController implements PanelController {
   }
 
   /**
+   * Simulates the user finishing a drawing on DRA's map: the ring replaces any area there was, with
+   * made-up counts of what is inside. No effect unless drawing.
+   */
+  finishAreaDraw(ring: Array<[number, number]> = AREA_DRAWN_RING): void {
+    this.stopAreaTimer();
+    const area = this.state.area;
+    if (!area?.drawing) return;
+    const hadArea = Boolean(area.ring || area.region || area.cluster);
+    this.setArea(
+      {
+        mode: area.mode, unavailable: area.unavailable, drawing: false,
+        ring: ring.map((p) => [p[0], p[1]] as [number, number]), ...AREA_DRAWN_COUNTS,
+      },
+      hadArea ? 'Undo replacing area' : undefined,
+    );
+  }
+
+  /** Simulates clicking a named region on DRA's map. */
+  finishAreaPick(index?: number): void {
+    const kind = this.state.area?.picking;
+    if (!kind) return;
+    const regions = kind === 'county' ? this.state.regions?.counties : this.state.regions?.towns;
+    const selected = index ?? regions?.[0]?.index;
+    if (selected !== undefined) this.useRegion(kind, selected);
+  }
+
+  private useRegion(kind: 'county' | 'town', index: number): void {
+    const { area, regions, walkthrough } = this.state;
+    const choice = (kind === 'county' ? regions?.counties : regions?.towns)?.find((r) => r.index === index);
+    if (walkthrough || !choice) return;
+    this.stopAreaTimer();
+    const hadArea = Boolean(area?.ring || area?.region || area?.cluster);
+    this.setArea(
+      {
+        mode: area?.mode ?? 'prefer', unavailable: area?.unavailable, drawing: false,
+        region: { kind, ...choice }, ...(kind === 'county' ? AREA_VIEW_COUNTS : AREA_DRAWN_COUNTS),
+      },
+      hadArea ? 'Undo replacing area' : undefined,
+    );
+  }
+
+  /**
+   * A new area (or mode, or none): like the extension, the options on offer were found for the old
+   * one, so they are dropped.
+   */
+  private setArea(area: PanelState['area'], undoLabel?: string): void {
+    const prevArea = this.state.area;
+    if (undoLabel && prevArea && (prevArea.ring || prevArea.region || prevArea.cluster)) {
+      this.settingUndo = { kind: 'area', prevArea: structuredClone(prevArea), label: undoLabel };
+      this.undoLatest = 'setting';
+    }
+    this.state = {
+      ...this.state,
+      area,
+      undo: this.currentMockUndo(),
+      solutions: [],
+      hoveredSolutionId: undefined,
+      solve: { status: 'idle' },
+    };
+    this.emit();
+  }
+
+  private stopAreaTimer(): void {
+    if (this.areaTimer !== null) {
+      clearTimeout(this.areaTimer);
+      this.areaTimer = null;
+    }
+  }
+
+  /**
+   * Simulates the county-cluster search finishing: made-up clusterings for the requested district
+   * count and tolerance, or none below ±1%. No effect unless finding.
+   */
+  finishClusterFind(): void {
+    this.stopClusterTimer();
+    const clusters = this.state.clusters;
+    if (clusters?.status !== 'finding') return;
+    const { numDistricts, tolerance } = clusters;
+    const totalPop = this.state.map?.totalPop ?? NY_MAP_INFO.totalPop;
+    const districtSize = totalPop / numDistricts;
+    const tight = tolerance < 0.01 && numDistricts > 1;
+    const pct = `±${Number((tolerance * 100).toFixed(2))}%`;
+    this.state = {
+      ...this.state,
+      clusters: {
+        ...clusters,
+        status: tight ? 'none' : 'done',
+        districtSize,
+        results: tight ? [] : makeMockClusterings(numDistricts, tolerance, totalPop),
+        exhaustive: tight || numDistricts <= 14,
+        elapsedMs: tight ? 840 : numDistricts <= 14 ? 2300 : 10000,
+        message: tight
+          ? `No grouping of whole counties keeps every district within ${pct} of ${Math.round(districtSize).toLocaleString('en-US')}. Try a wider tolerance.`
+          : undefined,
+        hovered: undefined,
+      },
+    };
+    this.emit();
+  }
+
+  private stopClusterTimer(): void {
+    if (this.clusterTimer !== null) {
+      clearTimeout(this.clusterTimer);
+      this.clusterTimer = null;
+    }
+  }
+
+  private useCluster(id: string, index: number): void {
+    const { area, clusters, walkthrough } = this.state;
+    const clustering = clusters?.results.find((r) => r.id === id);
+    const cluster = clustering?.clusters[index];
+    if (walkthrough || !clustering || !cluster || area?.drawing || area?.picking) return;
+    this.stopAreaTimer();
+    const names = clustering.countyNames[index] ?? [];
+    const name = names.length === 1 ? names[0] : `${names[0] ?? 'County'} cluster (${names.length} counties)`;
+    const hadArea = Boolean(area?.ring || area?.region || area?.cluster);
+    this.setArea(
+      {
+        mode: area?.mode ?? 'prefer', unavailable: area?.unavailable, drawing: false,
+        cluster: { name, counties: [...cluster.counties] }, blocks: cluster.counties.length * 731, people: cluster.pop,
+      },
+      hadArea ? 'Undo replacing area' : undefined,
+    );
+  }
+
+  /**
    * Simulates the user painting the next unfinished block in the current walkthrough step
    * (or committing an awaiting-commit step), updating district deviations live.
    */
@@ -109,6 +282,12 @@ export class MockController implements PanelController {
     const cur = steps[wt.current];
     if (!cur) return false;
 
+    // A manual edit in DRA moves DRA's undo history, withdrawing any pending paint undo.
+    if (this.paintUndoStack.length > 0) {
+      this.paintUndoStack = [];
+      this.undoLatest = this.settingUndo ? 'setting' : null;
+    }
+
     // If awaiting commit, simulate user clicking DRA's checkmark and advancing
     if (cur.status === 'awaiting-commit') {
       cur.status = 'done';
@@ -116,11 +295,13 @@ export class MockController implements PanelController {
         steps[wt.current + 1].status = 'active';
         this.state = {
           ...this.state,
+          undo: this.currentMockUndo(true),
           walkthrough: { ...wt, steps, current: wt.current + 1 },
         };
       } else {
         this.state = {
           ...this.state,
+          undo: this.currentMockUndo(true),
           walkthrough: {
             ...wt,
             steps,
@@ -151,6 +332,7 @@ export class MockController implements PanelController {
         this.state = {
           ...this.state,
           ...live,
+          undo: this.currentMockUndo(true),
           walkthrough: {
             ...wt,
             steps,
@@ -169,6 +351,7 @@ export class MockController implements PanelController {
       this.state = {
         ...this.state,
         ...live,
+        undo: this.currentMockUndo(true),
         walkthrough: { ...wt, steps },
       };
       this.emit();
@@ -208,10 +391,14 @@ export class MockController implements PanelController {
       const live = this.applyLiveTransfer(step.from, step.to, moved);
       const next = steps.findIndex((s, i) => i > w.current && s.status !== 'done');
       if (next >= 0 && steps[next].status === 'pending') steps[next].status = 'active';
+      const label = step.to === 0 ? `Undo erasing step ${w.current + 1}` : `Undo painting step ${w.current + 1}`;
+      this.paintUndoStack.push({ stepId: step.id, stepIndex: w.current, from: step.from, to: step.to, moved, label });
+      this.undoLatest = 'paint';
       this.state = {
         ...this.state,
         ...live,
         autoPaint: { ...a, busy: false },
+        undo: this.currentMockUndo(true),
         walkthrough: {
           ...w,
           steps,
@@ -252,9 +439,121 @@ export class MockController implements PanelController {
         this.handleSetScope(action.scope);
         break;
       }
+      case 'area-draw': {
+        const area = this.state.area;
+        if (this.state.walkthrough || area?.drawing || area?.picking || area?.unavailable) return;
+        // Drawing alone does not change the area, so the options stay until it is finished.
+        this.state = { ...this.state, area: { ...(area ?? { mode: 'prefer' }), drawing: true } };
+        this.emit();
+        if (this.areaDrawMs > 0) {
+          this.stopAreaTimer();
+          this.areaTimer = setTimeout(() => this.finishAreaDraw(), this.areaDrawMs);
+        }
+        break;
+      }
+      case 'area-cancel-draw': {
+        this.stopAreaTimer();
+        const area = this.state.area;
+        if (!area?.drawing && !area?.picking) return;
+        // Cancelling a first drawing leaves no area at all; otherwise the old one stays.
+        this.state = {
+          ...this.state,
+          area: area.ring || area.region || area.cluster || area.unavailable ? { ...area, drawing: false, picking: undefined } : undefined,
+        };
+        this.emit();
+        break;
+      }
+      case 'area-use-view': {
+        const area = this.state.area;
+        if (this.state.walkthrough) return;
+        if (area?.unavailable && this.state.mapMode !== 'mini') return;
+        this.stopAreaTimer();
+        const hadArea = Boolean(area?.ring || area?.region || area?.cluster);
+        this.setArea(
+          {
+            mode: area?.mode ?? 'prefer',
+            ring: AREA_VIEW_RING.map((p) => [p[0], p[1]] as [number, number]),
+            ...AREA_VIEW_COUNTS,
+            drawing: false,
+            ...(area?.unavailable ? { unavailable: area.unavailable } : {}),
+          },
+          hadArea ? 'Undo replacing area' : undefined,
+        );
+        break;
+      }
+      case 'area-use-region':
+        this.useRegion(action.kind, action.index);
+        break;
+      case 'area-pick-region': {
+        const { area, regions, walkthrough } = this.state;
+        const choices = action.kind === 'county' ? regions?.counties : regions?.towns;
+        if (walkthrough || area?.drawing || area?.picking || area?.unavailable || !choices?.length) return;
+        this.state = { ...this.state, area: { mode: 'prefer', ...area, drawing: false, picking: action.kind } };
+        this.emit();
+        if (this.areaDrawMs > 0) this.areaTimer = setTimeout(() => this.finishAreaPick(), this.areaDrawMs);
+        break;
+      }
+      case 'area-clear': {
+        if (this.state.walkthrough || !this.state.area) return;
+        this.stopAreaTimer();
+        const unavailable = this.state.area.unavailable;
+        this.setArea(
+          unavailable ? { mode: this.state.area.mode, drawing: false, unavailable } : undefined,
+          'Undo clearing area',
+        );
+        break;
+      }
+      case 'clusters-find': {
+        if (this.state.walkthrough || this.state.clusters?.status === 'finding') return;
+        this.stopClusterTimer();
+        this.state = {
+          ...this.state,
+          clusters: { status: 'finding', numDistricts: action.numDistricts, tolerance: action.tolerance, results: [] },
+        };
+        this.emit();
+        if (this.clusterFindMs > 0) this.clusterTimer = setTimeout(() => this.finishClusterFind(), this.clusterFindMs);
+        break;
+      }
+      case 'clusters-cancel': {
+        const clusters = this.state.clusters;
+        if (clusters?.status !== 'finding') return;
+        this.stopClusterTimer();
+        this.state = { ...this.state, clusters: { ...clusters, status: 'idle', results: [], hovered: undefined } };
+        this.emit();
+        break;
+      }
+      case 'clusters-hover': {
+        const clusters = this.state.clusters;
+        if (!clusters) return;
+        const hovered =
+          action.id === null || !clusters.results.some((r) => r.id === action.id)
+            ? undefined
+            : action.cluster === undefined
+              ? { id: action.id }
+              : { id: action.id, cluster: action.cluster };
+        if (JSON.stringify(hovered) === JSON.stringify(clusters.hovered)) return;
+        this.state = { ...this.state, clusters: { ...clusters, hovered } };
+        this.emit();
+        break;
+      }
+      case 'clusters-use-as-area':
+        this.useCluster(action.id, action.cluster);
+        break;
+      case 'undo': {
+        this.handleUndo();
+        break;
+      }
+      case 'set-area-mode': {
+        const area = this.state.area;
+        if (this.state.walkthrough || !area || area.mode === action.mode) return;
+        this.setArea({ ...area, mode: action.mode });
+        break;
+      }
       case 'set-district-lock': {
         if (this.state.walkthrough) return;
-        const next = new Set(this.state.lockedDistricts ?? []);
+        const prevLocks = this.state.lockedDistricts ?? [];
+        const prevSet = new Set(prevLocks);
+        const next = new Set(prevLocks);
         // Unassigned (0) is not a district and is never locked.
         for (const d of action.districts.filter((x) => x !== 0)) {
           if (action.locked) next.add(d);
@@ -269,10 +568,40 @@ export class MockController implements PanelController {
             : scope.mode === 'one' && scope.with
               ? (() => {
                   const keep = scope.with!.filter((d) => !next.has(d));
-                  return keep.length ? { ...scope, with: keep } : { mode: 'one' as const, district: scope.district };
+                  const withGoal = scope.goal !== undefined ? { goal: scope.goal } : {};
+                  return keep.length ? { ...scope, with: keep } : { mode: 'one' as const, district: scope.district, ...withGoal };
                 })()
               : scope;
-        this.state = { ...this.state, lockedDistricts, scope: cleaned, solutions: [], hoveredSolutionId: undefined, solve: { status: 'idle' } };
+        if (JSON.stringify(lockedDistricts) !== JSON.stringify(prevLocks)) {
+          const map = this.state.map;
+          const targets = map ? computeTargets(map.totalPop, map.numDistricts) : null;
+          const zeroedUnlocked = this.state.districts
+            .filter((d) => !prevSet.has(d.index) && (targets ? isZeroed(d.pop, targets) : d.deviation === 0))
+            .map((d) => d.index);
+          const added = lockedDistricts.filter((d) => !prevSet.has(d));
+          const removed = prevLocks.filter((d) => !next.has(d));
+          let label: string | null = null;
+          if (!action.locked && removed.length > 0 && lockedDistricts.length === 0) label = 'Undo unlock all';
+          else if (action.locked && added.length > 0 && zeroedUnlocked.length > 0 && added.length === zeroedUnlocked.length && added.every((d) => zeroedUnlocked.includes(d))) {
+            label = `Undo lock the ${added.length} at zero`;
+          } else if (action.locked && added.length >= 2) label = `Undo locking ${added.length} districts`;
+          if (label) {
+            this.settingUndo = { kind: 'locks', prevLocks: prevLocks.slice(), prevScope: scope, afterScope: cleaned, label };
+            this.undoLatest = 'setting';
+          } else if (this.settingUndo?.kind === 'locks') {
+            this.settingUndo = null;
+            this.undoLatest = this.paintUndoStack.length ? 'paint' : null;
+          }
+        }
+        this.state = {
+          ...this.state,
+          lockedDistricts,
+          scope: cleaned,
+          undo: this.currentMockUndo(),
+          solutions: [],
+          hoveredSolutionId: undefined,
+          solve: { status: 'idle' },
+        };
         this.emit();
         break;
       }
@@ -365,6 +694,7 @@ export class MockController implements PanelController {
       }
       case 'load-csv': {
         this.stopAutoTick();
+        this.clearAllUndo();
         const rows = Math.max(0, action.text.trim().split(/\r?\n/).length - 1);
         const districts = this.state.districts.length > 0 ? this.state.districts : makeNYDistricts();
         const baseMap = this.state.map ?? NY_MAP_INFO;
@@ -381,6 +711,7 @@ export class MockController implements PanelController {
           solve: { status: 'done', elapsedMs: 42 },
           solutions: SINGLE_DISTRICT_SOLUTIONS,
           walkthrough: undefined,
+          undo: undefined,
         };
         this.emit();
         break;
@@ -397,6 +728,9 @@ export class MockController implements PanelController {
         break;
       }
       case 'retry-connection': {
+        this.stopAreaTimer();
+        this.stopClusterTimer();
+        this.clearAllUndo();
         this.state = SCENARIOS['live-single'].createState();
         this.emit();
         break;
@@ -404,14 +738,83 @@ export class MockController implements PanelController {
     }
   }
 
+  private handleUndo(): void {
+    const cur = this.state.undo;
+    if (!cur) return;
+    if (cur.kind === 'paint') {
+      const entry = this.paintUndoStack.pop();
+      if (!entry) {
+        this.state = { ...this.state, undo: this.currentMockUndo() };
+        this.emit();
+        return;
+      }
+      const live = this.applyLiveTransfer(entry.to, entry.from, entry.moved);
+      const wt = this.state.walkthrough;
+      let walkthrough = wt;
+      if (wt) {
+        const idx = wt.steps.findIndex((s) => s.id === entry.stepId);
+        if (idx >= 0) {
+          const steps = wt.steps.map((s, i) =>
+            i === idx
+              ? { ...s, status: 'active' as const, blocks: s.blocks.map((b) => ({ ...b, done: false })) }
+              : s.status === 'active'
+                ? { ...s, status: 'pending' as const }
+                : s,
+          );
+          walkthrough = { ...wt, steps, current: idx, finalCheck: undefined };
+        }
+      }
+      this.undoLatest = this.paintUndoStack.length ? 'paint' : this.settingUndo ? 'setting' : null;
+      this.state = { ...this.state, ...live, walkthrough, undo: this.currentMockUndo(Boolean(walkthrough)) };
+      this.emit();
+      return;
+    }
+    const entry = this.settingUndo;
+    this.settingUndo = null;
+    this.undoLatest = this.paintUndoStack.length ? 'paint' : null;
+    if (!entry || this.state.walkthrough) {
+      this.state = { ...this.state, undo: this.currentMockUndo() };
+      this.emit();
+      return;
+    }
+    if (entry.kind === 'locks') {
+      const scope = JSON.stringify(this.state.scope) === JSON.stringify(entry.afterScope) ? entry.prevScope : this.state.scope;
+      this.state = {
+        ...this.state,
+        lockedDistricts: entry.prevLocks,
+        scope,
+        undo: this.currentMockUndo(),
+        solutions: [],
+        hoveredSolutionId: undefined,
+        solve: { status: 'idle' },
+      };
+      this.emit();
+      return;
+    }
+    this.state = {
+      ...this.state,
+      area: entry.prevArea,
+      undo: this.currentMockUndo(),
+      solutions: [],
+      hoveredSolutionId: undefined,
+      solve: { status: 'idle' },
+    };
+    this.emit();
+  }
+
   private handleSetScope(scope: Scope): void {
     const districts = this.state.districts;
-    if (scope.mode === 'one' && scope.with) {
-      // Like the real controller: only districts that touch this one can be chosen.
+    if (scope.mode === 'one') {
       const district = scope.district;
-      const nbrs = districts.find((d) => d.index === district)?.neighbors ?? [];
-      const keep = [...new Set(scope.with)].filter((d) => nbrs.includes(d)).sort((a, b) => a - b);
-      scope = keep.length ? { mode: 'one', district, with: keep } : { mode: 'one', district };
+      const withGoal = scope.goal !== undefined ? { goal: scope.goal } : {};
+      if (scope.with) {
+        // Like the real controller: only districts that touch this one can be chosen.
+        const nbrs = districts.find((d) => d.index === district)?.neighbors ?? [];
+        const keep = [...new Set(scope.with)].filter((d) => nbrs.includes(d)).sort((a, b) => a - b);
+        scope = keep.length ? { mode: 'one', district, with: keep, ...withGoal } : { mode: 'one', district, ...withGoal };
+      } else {
+        scope = { mode: 'one', district, ...withGoal };
+      }
     }
     let feasibility: GroupFeasibility | undefined;
     let interaction = undefined;
@@ -441,13 +844,56 @@ export class MockController implements PanelController {
   }
 
   private handleSolve(): void {
+    this.solveAnywhere();
+    this.applyMockArea();
+  }
+
+  /**
+   * With an area, a rough imitation of AreaPreference on whatever the mock solve produced:
+   *  - 'prefer': every card is inside except the last one (when there are two or more), which
+   *    fills in with a few blocks outside, and the status line says why;
+   *  - 'only': that last card is dropped; with nothing left, the message says the area is why.
+   */
+  private applyMockArea(): void {
+    const area = this.state.area;
+    const { solutions, solve } = this.state;
+    if (!(area?.ring || area?.region || area?.cluster) || solve.status !== 'done' || solutions.length === 0) return;
+    const what = this.state.scope.mode === 'one' ? 'option' : 'plan';
+    const stamp = (card: SolutionCard, outsideArea: number): SolutionCard => ({ ...card, stats: { ...card.stats, outsideArea } });
+    let next: SolutionCard[];
+    let message: string | undefined;
+    if (area.mode === 'prefer') {
+      const last = solutions.length - 1;
+      next = solutions.map((card, i) => stamp(card, i === last && last > 0 ? 3 : 0));
+      if (last > 0) message = `Only ${last} ${last === 1 ? what : `${what}s`} fit inside your area; the last one moves a few blocks outside it.`;
+    } else {
+      next = solutions.slice(0, -1).map((card) => stamp(card, 0));
+      if (next.length === 0) {
+        message = `Nothing can be done inside your area. Choose Prefer to allow moves outside it, or mark a larger area.`;
+      }
+    }
+    this.state = { ...this.state, solutions: next, solve: { ...solve, message: message ?? solve.message } };
+    this.emit();
+  }
+
+  private solveAnywhere(): void {
     const { scope, districts } = this.state;
     if (scope.mode === 'one') {
       const targetRow = districts.find((d) => d.index === scope.district);
-      if (!targetRow || Math.abs(targetRow.deviation) <= 1) {
+      const goal = scope.goal;
+      const alreadyAtGoal = !targetRow
+        ? true
+        : goal !== undefined
+          ? targetRow.deviation === goal
+          : Math.abs(targetRow.deviation) <= 1;
+      if (!targetRow || alreadyAtGoal) {
+        const message =
+          targetRow && goal !== undefined
+            ? `${formatDistrictName(targetRow.index, districts)} is already at ${formatSigned(goal)}.`
+            : 'District is already at zero deviation.';
         this.state = {
           ...this.state,
-          solve: { status: 'done', elapsedMs: 6, message: 'District is already at zero deviation.' },
+          solve: { status: 'done', elapsedMs: 6, message },
           solutions: [],
         };
         this.emit();
@@ -457,7 +903,7 @@ export class MockController implements PanelController {
         this.state = {
           ...this.state,
           solve: { status: 'done', elapsedMs: 31 },
-          solutions: makeChosenNeighborOptions(districts, scope.district, scope.with),
+          solutions: makeChosenNeighborOptions(districts, scope.district, scope.with, goal),
         };
         this.emit();
         return;
@@ -469,11 +915,12 @@ export class MockController implements PanelController {
       );
       const nbr = allowed[0] ?? targetRow.neighbors?.[0] ?? (targetRow.index === 1 ? 2 : 1);
       const nbrRow = districts.find((d) => d.index === nbr);
-      const from = targetRow.deviation > 0 ? targetRow.index : nbr;
-      const to = targetRow.deviation > 0 ? nbr : targetRow.index;
-      const people = Math.abs(targetRow.deviation);
+      const delta = targetRow.deviation - (goal ?? 0);
+      const from = delta > 0 ? targetRow.index : nbr;
+      const to = delta > 0 ? nbr : targetRow.index;
+      const people = Math.abs(delta);
       const solutions: SolutionCard[] =
-        scope.district === 13
+        scope.district === 13 && goal === undefined
           ? SINGLE_DISTRICT_SOLUTIONS
           : [
               {
@@ -493,13 +940,13 @@ export class MockController implements PanelController {
                 },
                 borderFlows: [{ from, to, people }],
                 deviations: [
-                  { district: targetRow.index, before: targetRow.deviation, after: 0 },
+                  { district: targetRow.index, before: targetRow.deviation, after: goal ?? 0 },
                   ...(nbrRow
                     ? [
                         {
                           district: nbrRow.index,
                           before: nbrRow.deviation,
-                          after: nbrRow.deviation + targetRow.deviation,
+                          after: nbrRow.deviation + delta,
                         },
                       ]
                     : []),
@@ -584,9 +1031,12 @@ export class MockController implements PanelController {
                 };
               });
 
+    this.settingUndo = null;
+    this.undoLatest = this.paintUndoStack.length ? 'paint' : null;
     this.state = {
       ...this.state,
       hoveredSolutionId: undefined,
+      undo: this.currentMockUndo(true),
       walkthrough: {
         solutionId,
         steps,
@@ -715,7 +1165,11 @@ export class MockController implements PanelController {
           };
         })
       : [];
-    const ok = deviations.every((d) => Math.abs(d.after) <= 1);
+    const scope = this.state.scope;
+    const ok =
+      scope.mode === 'one' && scope.goal !== undefined
+        ? deviations.some((d) => d.district === scope.district && d.after === scope.goal)
+        : deviations.every((d) => Math.abs(d.after) <= 1);
     return { ok: ok as boolean | null, deviations };
   }
 

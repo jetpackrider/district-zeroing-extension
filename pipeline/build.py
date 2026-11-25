@@ -17,6 +17,9 @@ from format import atomic_write, attrs_file, check_county, file_matches, geometr
 from inputs import (ROOT, STATES, BLOCK_GROUP_STATES, fixture_text, get_inputs, tiger_land,
                     populations, precinct_membership, reference_graph, tiger_blocks)
 
+from names import names_file, names_for_bundle, validate_names
+from outlines import check_outlines, outlines_file, outlines_for_bundle
+from points import bundle_points, check_points, points_file, points_for_bundle
 from towns import town_file, towns_for_bundle, validate_towns
 
 EXTERIOR = "OUT_OF_STATE"
@@ -202,13 +205,19 @@ def run_state(command, state, version, local_blocks, out, audit):
 
     manifest_path = out / "manifest.json"
     water_ref, water_packed = water_file(land)
-    town_ref, town_packed, town_sources, town_assigned = town_file(state, ids)
+    town_ref, town_packed, town_sources, town_assigned, town_names = town_file(state, ids)
+    names_ref, names_packed = names_file(counties.tolist(), town_names, town_ref["count"])
+    # Census internal points, read again without geometry and checked against this block order.
+    points, points_tiger = bundle_points(state, ids)
+    points_ref, points_packed = points_file(points)
     provenance.update(town_sources)
     measured.update(towns=town_ref["count"], townBlocks=town_assigned)
     if command == "build":
         publish(out, attr_ref, packed)
         publish(out, water_ref, water_packed)
         publish(out, town_ref, town_packed)
+        publish(out, names_ref, names_packed)
+        publish(out, points_ref, points_packed)
         print(f"Attributes available: {attr_ref['bytes']} bytes ({attr_ref['file']})")
         manifest = dict(format=1, state=state, stateFips=STATES[state],
                         censusVintage="2020 (January 2023 TABBLOCK20 re-release)",
@@ -217,8 +226,14 @@ def run_state(command, state, version, local_blocks, out, audit):
                                     "CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/). Do not sell. "
                                     "U.S. Census Bureau data are public domain. "
                                     "Block data credit: https://github.com/dra2020/block_data.",
-                        sources=provenance, attrs=attr_ref, water=water_ref, towns=town_ref, counties=[])
+                        sources=provenance, attrs=attr_ref, water=water_ref, towns=town_ref,
+                        points=points_ref, names=names_ref, counties=[])
         manifest["counties"] = list(geometry_files(out, counties, county_of, ids, shapes, crs))
+        outlines_ref, outlines_packed = outlines_file(counties.tolist(), county_of, land, shapes, crs)
+        publish(out, outlines_ref, outlines_packed)
+        manifest["outlines"] = outlines_ref
+        audit["outlines"] = check_outlines(out, manifest, outlines_ref)
+        print(f"Outlines: {json.dumps(audit['outlines'])}")
         atomic_write(manifest_path, (json.dumps(manifest, indent=2) + "\n").encode())
     else:
         manifest = json.loads(manifest_path.read_bytes())
@@ -227,6 +242,7 @@ def run_state(command, state, version, local_blocks, out, audit):
         if manifest.get("water") != water_ref or not file_matches(out / water_ref["file"], water_ref):
             raise ValueError("Water sidecar is missing or differs (run: build.py water STATE)")
         validate_towns(out, manifest, town_ref, town_sources)
+        validate_names(out, manifest, names_ref)
         if not same_sources(manifest["sources"], provenance) or manifest["draDataVersion"] != version:
             raise ValueError("Built manifest uses different inputs or a different DRA version")
         if [ref["fips"] for ref in manifest["counties"]] != counties.tolist():
@@ -237,6 +253,11 @@ def run_state(command, state, version, local_blocks, out, audit):
             if ref["features"] != len(selected_ids) or not file_matches(file, ref):
                 raise ValueError(f"County {ref['fips']} feature count or hash differs")
             check_county(gzip.decompress(file.read_bytes()), selected_ids)
+        audit["points"] = check_points(out, manifest, points_ref, ids, points, state, points_tiger)
+        print(f"Points: {json.dumps(audit['points'])}")
+        outlines_ref, _ = outlines_file(counties.tolist(), county_of, land, shapes, crs)
+        audit["outlines"] = check_outlines(out, manifest, outlines_ref)
+        print(f"Outlines: {json.dumps(audit['outlines'])}")
 
     audit["bundle"] = dict(attrsBytes=attr_ref["bytes"],
                            countyBytes=sum(ref["bytes"] for ref in manifest["counties"]),
@@ -254,7 +275,9 @@ def run_state(command, state, version, local_blocks, out, audit):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["build", "validate", "all", "water", "towns", "validate-towns"])
+    parser.add_argument("command", choices=["build", "validate", "all", "water", "towns", "validate-towns",
+                                            "points", "validate-points", "names", "validate-names",
+                                            "outlines", "validate-outlines"])
     parser.add_argument("states", type=str.upper, nargs="*", metavar="STATE")
     parser.add_argument("--version")
     parser.add_argument("--dra-blocks", type=Path, help="Local DRA demographic CSV or ZIP")
@@ -274,6 +297,38 @@ def main():
         for state in dict.fromkeys(args.states or STATES):
             towns_for_bundle(state, validate=args.command == "validate-towns")
         return 0
+    if args.command in {"names", "validate-names"}:
+        if args.version or args.dra_blocks or args.revalidate:
+            parser.error("Names commands use the existing bundle and 2020 Census inputs")
+        for state in dict.fromkeys(args.states or STATES):
+            names_for_bundle(state, validate=args.command == "validate-names")
+        return 0
+    if args.command in {"outlines", "validate-outlines"}:
+        if args.version or args.dra_blocks or args.revalidate:
+            parser.error("Outline commands use the existing bundle and the cached TIGER blocks")
+        failed = []
+        for state in dict.fromkeys(args.states or STATES):
+            try:
+                outlines_for_bundle(state, validate=args.command == "validate-outlines")
+            except Exception as error:
+                print(f"{state}: FAILED {type(error).__name__}: {error}", flush=True)
+                failed.append(state)
+        if failed:
+            print(f"Failed: {' '.join(failed)}")
+        return int(bool(failed))
+    if args.command in {"points", "validate-points"}:
+        if args.version or args.dra_blocks or args.revalidate:
+            parser.error("Point commands use the existing bundle and the cached TIGER blocks")
+        failed = []
+        for state in dict.fromkeys(args.states or STATES):
+            try:
+                points_for_bundle(state, validate=args.command == "validate-points")
+            except Exception as error:
+                print(f"{state}: FAILED {type(error).__name__}: {error}", flush=True)
+                failed.append(state)
+        if failed:
+            print(f"Failed: {' '.join(failed)}")
+        return int(bool(failed))
     if args.command == "all":
         if args.dra_blocks or args.version:
             parser.error("Input overrides apply to single-state commands")

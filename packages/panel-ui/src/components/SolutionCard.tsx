@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import type { DistrictRow, MapInfo, PanelAction, SolutionCard as SolutionCardData } from '@zd/contracts';
 import { groupBorderTrades } from '../flows';
 import {
+  formatBlocks,
   formatCompactness,
   formatDistrictName,
   formatDistrictShort,
@@ -62,6 +63,9 @@ export function SolutionCard({
   const hasTowns = card.stats.newTownSplits !== undefined;
   // People, blocks, precinct splits, county splits, compactness, then the optional ones.
   const statCount = 5 + (hasSteps ? 1 : 0) + (hasTowns ? 1 : 0) + (isPlan ? 1 : 0);
+  // With an area (AreaPreference) the solver counts the moved blocks outside it; absent = no area.
+  const outsideArea = card.stats.outsideArea;
+  const insideArea = outsideArea === 0;
 
   const startWalkthrough = () => {
     dispatch({ type: 'start-walkthrough', solutionId: card.id });
@@ -69,7 +73,7 @@ export function SolutionCard({
 
   return (
     <div
-      className={`zd-solution-card${isHovered ? ' zd-solution-card--hovered' : ''}`}
+      className={`zd-card zd-solution-card${isHovered ? ' zd-solution-card--hovered' : ''}`}
       role="button"
       tabIndex={0}
       data-testid={`solution-card-${card.id}`}
@@ -89,13 +93,21 @@ export function SolutionCard({
       <div className="zd-solution-card__head">
         <div className="zd-solution-card__head-main">
           <span className="zd-solution-card__title">{title}</span>
-          {badges && badges.length > 0 && (
+          {((badges && badges.length > 0) || insideArea) && (
             <div className="zd-solution-card__badges" aria-label="Plan highlights">
-              {badges.map((label) => (
-                <span key={label} className="zd-solution-card__badge">
+              {badges?.map((label) => (
+                <span key={label} className="zd-pill zd-pill--zero">
                   {label}
                 </span>
               ))}
+              {insideArea && (
+                <span
+                  className="zd-pill zd-pill--accent"
+                  data-testid={`inside-area-${card.id}`}
+                >
+                  Inside your area
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -109,21 +121,27 @@ export function SolutionCard({
         </span>
       </div>
 
+      {outsideArea !== undefined && outsideArea > 0 && (
+        <div className="zd-note zd-note--warn" data-testid={`outside-area-${card.id}`}>
+          Moves {formatBlocks(outsideArea)} outside your area.
+        </div>
+      )}
+
       {card.stats.usesWater && (
-        <div className="zd-solution-card__water" data-testid={`uses-water-${card.id}`}>
+        <div className="zd-note zd-note--warn" data-testid={`uses-water-${card.id}`}>
           Crosses water: no way to do this over land alone was found.
         </div>
       )}
 
       {card.stats.longReach && (
-        <div className="zd-solution-card__reach" data-testid={`long-reach-${card.id}`}>
+        <div className="zd-note zd-note--warn" data-testid={`long-reach-${card.id}`}>
           Long reach: no compact bite out of the border hits the number, so this one reaches further
           in, through a chain of blocks.
         </div>
       )}
 
       {unassigned.traded && (
-        <div className="zd-solution-card__unassigned" data-testid={`unassigned-${card.id}`}>
+        <div className="zd-note zd-note--info" data-testid={`unassigned-${card.id}`}>
           {unassigned.net > 0
             ? `Leaves ${formatInt(unassigned.net)} more ${unassigned.net === 1 ? 'person' : 'people'} unassigned.`
             : unassigned.net < 0
@@ -138,20 +156,20 @@ export function SolutionCard({
       >
         <div className="zd-stat">
           <span className="zd-stat__label">People moved</span>
-          <span className="zd-stat__val">{formatInt(card.stats.people)}</span>
+          <span className="zd-stat__val zd-num">{formatInt(card.stats.people)}</span>
         </div>
 
         {hasSteps && (
           <div className={`zd-stat${winsSteps ? ' zd-stat--win' : ''}`} data-testid={`steps-${card.id}`}>
             <span className="zd-stat__label">Steps to paint</span>
-            <span className="zd-stat__val">{formatInt(steps)}</span>
+            <span className="zd-stat__val zd-num">{formatInt(steps)}</span>
             <span className="zd-stat__sub">one per precinct</span>
           </div>
         )}
 
         <div className={`zd-stat${winsBlocks ? ' zd-stat--win' : ''}`}>
           <span className="zd-stat__label">Blocks moved</span>
-          <span className="zd-stat__val">{formatInt(card.stats.blocks)}</span>
+          <span className="zd-stat__val zd-num">{formatInt(card.stats.blocks)}</span>
           {card.stats.populatedBlocks !== card.stats.blocks && (
             <span className="zd-stat__sub zd-num">{formatInt(card.stats.populatedBlocks)} pop.</span>
           )}
@@ -159,11 +177,11 @@ export function SolutionCard({
 
         <div className={`zd-stat${winsSplits ? ' zd-stat--win' : ''}`}>
           <span className="zd-stat__label">Precinct splits</span>
-          <span className="zd-stat__val">
+          <span className="zd-stat__val zd-num">
             {card.stats.newPrecinctSplits > 0 ? `+${card.stats.newPrecinctSplits}` : '0'}
           </span>
           {card.stats.healedPrecinctSplits > 0 && (
-            <span className="zd-stat__sub zd-num" style={{ color: 'var(--zd-zero)' }}>
+            <span className="zd-stat__sub zd-num zd-stat__val--better">
               −{card.stats.healedPrecinctSplits} healed
             </span>
           )}
@@ -171,7 +189,7 @@ export function SolutionCard({
 
         <div className={`zd-stat${winsSplits ? ' zd-stat--win' : ''}`}>
           <span className="zd-stat__label">County splits</span>
-          <span className="zd-stat__val">
+          <span className="zd-stat__val zd-num">
             {card.stats.newCountySplits > 0 ? `+${card.stats.newCountySplits}` : '0'}
           </span>
         </div>
@@ -179,7 +197,7 @@ export function SolutionCard({
         {card.stats.newTownSplits !== undefined && (
           <div className="zd-stat" data-testid={`town-splits-${card.id}`}>
             <span className="zd-stat__label">Town splits</span>
-            <span className="zd-stat__val">
+            <span className="zd-stat__val zd-num">
               {card.stats.newTownSplits > 0 ? `+${card.stats.newTownSplits}` : '0'}
             </span>
           </div>
@@ -188,7 +206,7 @@ export function SolutionCard({
         <div className="zd-stat">
           <span className="zd-stat__label">Compactness</span>
           <span
-            className={`zd-stat__val${
+            className={`zd-stat__val zd-num${
               compactness.tone === 'better'
                 ? ' zd-stat__val--better'
                 : compactness.tone === 'worse'
@@ -204,14 +222,14 @@ export function SolutionCard({
         {isPlan && (
           <div className={`zd-stat${winsDistricts ? ' zd-stat--win' : ''}`}>
             <span className="zd-stat__label">Districts touched</span>
-            <span className="zd-stat__val">{formatInt(card.stats.districtsTouched)}</span>
+            <span className="zd-stat__val zd-num">{formatInt(card.stats.districtsTouched)}</span>
           </div>
         )}
       </div>
 
       {/* Multi-border plan flows (two-way borders collapsed into one trade) */}
       {isPlan && trades.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div className="zd-stack">
           <div className="zd-flows-list" aria-label="Border transfers">
             {visibleTrades.map((trade) => {
               if (trade.kind === 'two-way') {
@@ -224,10 +242,10 @@ export function SolutionCard({
                 return (
                   <span
                     key={trade.key}
-                    className="zd-flow-pill zd-flow-pill--twoway"
+                    className="zd-pill zd-pill--twoway zd-num zd-flow-trade"
                     data-testid={`flow-twoway-${trade.a}-${trade.b}`}
                   >
-                    <span className="zd-flow-pill__tag">2-way</span>
+                    <span className="zd-pill zd-flow-pill__tag">2-way</span>
                     <span className="zd-flow-pill__pair">
                       {firstFromColor && (
                         <span
@@ -262,7 +280,7 @@ export function SolutionCard({
               const fromColor = getDistrictColor(trade.from, districts);
               const toColor = getDistrictColor(trade.to, districts);
               return (
-                <span key={trade.key} className="zd-flow-pill">
+                <span key={trade.key} className="zd-pill zd-pill--neutral zd-num">
                   {fromColor && (
                     <span className="zd-swatch" style={{ backgroundColor: fromColor }} aria-hidden="true" />
                   )}
@@ -280,7 +298,7 @@ export function SolutionCard({
           {trades.length > PREVIEW_LIMIT && (
             <button
               type="button"
-              className="zd-expand-link"
+              className="zd-btn zd-btn--ghost zd-btn--sm zd-expand-link"
               onClick={(e) => {
                 e.stopPropagation();
                 setShowAllFlows((v) => !v);
@@ -296,7 +314,7 @@ export function SolutionCard({
 
       {/* Before → after deviations */}
       {deviations.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div className="zd-stack">
           <div className="zd-dev-changes" aria-label="District deviations before and after">
             {visibleDevs.map((dev) => {
               const swatch = getDistrictColor(dev.district, districts);
@@ -310,9 +328,9 @@ export function SolutionCard({
                     <span>{formatDistrictName(dev.district, districts)}:</span>
                   </span>
                   <span className="zd-dev-change__vals">
-                    <span style={{ color: 'var(--zd-text-muted)' }}>{formatSigned(dev.before)}</span>
+                    <span className="zd-muted">{formatSigned(dev.before)}</span>
                     <span aria-hidden="true">→</span>
-                    <span className={`zd-dev zd-dev--inline zd-dev--${afterTone}`}>
+                    <span className={`zd-pill zd-num zd-pill--inline zd-pill--${afterTone}`}>
                       {formatSigned(dev.after)}
                       {afterTone === 'zero' ? ' ✓' : ''}
                     </span>
@@ -324,7 +342,7 @@ export function SolutionCard({
           {deviations.length > PREVIEW_LIMIT && (
             <button
               type="button"
-              className="zd-expand-link"
+              className="zd-btn zd-btn--ghost zd-btn--sm zd-expand-link"
               onClick={(e) => {
                 e.stopPropagation();
                 setShowAllDevs((v) => !v);

@@ -22,7 +22,9 @@ export type HookId =
   | 'model.sm (shatter manager)'
   | 'model.redistrict.blockStamp()'
   | 'env.clientSession.on'
-  | 'env.theMap';
+  | 'env.theMap'
+  /** The map functions area drawing uses (project/unproject, canvas, panBy/easeTo). Optional. */
+  | 'map.unproject() (area drawing)';
 
 export interface HookCheckItem {
   id: HookId;
@@ -116,6 +118,10 @@ export interface HookSnapshot {
   hookPerf?: HookPerf;
   /** Whether "paint this step for me" can be offered on this map right now (src/dra/hooks.ts paintAvailability). */
   paint?: PaintAvailability;
+  /** DRA's current undo position (model.undoredo.cur), when available. */
+  undoPos?: number;
+  /** Opaque id of the current top entry of model.undoredo.stack, to detect undo + new edit at the same depth. */
+  undoTopId?: number;
 }
 
 /**
@@ -150,9 +156,35 @@ export interface PaintStepRequest {
  *   or DRA threw). Painting must stop; `undoHint` says whether DRA's Undo has something to take back.
  */
 export type PaintResult =
-  | { status: 'painted'; stepId: string; blocksMoved: number; featuresChanged: number; ms: number }
+  | { status: 'painted'; stepId: string; blocksMoved: number; featuresChanged: number; ms: number; undoBefore?: number; undoPos?: number; undoTopId?: number; snapSeq?: number }
   | { status: 'refused'; stepId: string; reason: string }
   | { status: 'mismatch'; stepId: string; summary: string; details: string[]; changedSomething: boolean; undoRecorded: boolean };
+
+/** Undo a step the extension painted, through DRA's own Undo, only while DRA is still at expectedUndoPos. */
+export interface UndoPaintRequest {
+  stepId: string;
+  precinctId: string;
+  from: number;
+  to: number;
+  wholePrecinct: boolean;
+  blocks: string[];
+  /** DRA's model.undoredo.cur right after painting this step. Refused if DRA has moved. */
+  expectedUndoPos: number;
+  /** Optional identity of model.undoredo.stack[expectedUndoPos - 1] right after painting. */
+  expectedUndoTopId?: number;
+}
+
+/**
+ * - undone: DRA's Undo ran and every block of the step is back in `from` (and nothing else changed).
+ * - refused: a guard said no before calling actionUndo; nothing changed in DRA. `stale` = DRA's undo
+ *   history moved, so Undo for that paint must be withdrawn.
+ * - mismatch: actionUndo was called and the re-read plan differs from restoring the step (or nothing
+ *   changed, or DRA threw).
+ */
+export type UndoPaintResult =
+  | { status: 'undone'; stepId: string; blocksRestored: number; featuresChanged: number; ms: number; undoPos: number; undoTopId?: number; snapSeq?: number }
+  | { status: 'refused'; stepId: string; reason: string; stale?: boolean }
+  | { status: 'mismatch'; stepId: string; summary: string; details: string[]; changedSomething: boolean; undoPos?: number; undoTopId?: number; snapSeq?: number };
 
 export interface HookPerf {
   /** Poll ticks so far (every 300 ms), and their cost on the page's main thread. */
@@ -213,6 +245,63 @@ export interface HighlightStatus {
   raises: number;
   /** Times the highlight data was written to the map source (each one re-places the labels). */
   dataWrites: number;
+  /** The area outline and drawing mode (src/hook/area.ts), when the hook has them. */
+  area?: AreaStatus;
+  /** The county cluster outlines (src/hook/clusters.ts), when the hook has them. */
+  clusters?: ClusterLayerStatus;
+}
+
+/**
+ * County cluster outlines for DRA's map and the mini-map (PanelState.clusters hovered): one
+ * polygon feature per county, in its cluster's color, and one labelled point per cluster.
+ * `emph`: 1 = the whole clustering is shown, 2 = the cluster hovered, 0 = another cluster of it.
+ */
+export interface ClusterFeatureProps {
+  cluster: number;
+  color: string;
+  emph: 0 | 1 | 2;
+  /** On the label point only, e.g. "2 districts". */
+  label?: string;
+}
+
+export interface ClusterFC {
+  type: 'FeatureCollection';
+  features: Array<{ type: 'Feature'; id?: number; properties: ClusterFeatureProps; geometry: { type: string; coordinates: unknown } }>;
+}
+
+/** What the cluster layers on DRA's map show (tests and diagnostics). */
+export interface ClusterLayerStatus {
+  /** Our cluster layer ids present on the map, in style order. */
+  layers: string[];
+  /** Features in the cluster source as the map holds them. */
+  featureCount: number;
+  /** Cluster labels drawn as HTML (when the style has no usable font). */
+  htmlLabels: number;
+  dataWrites: number;
+}
+
+/** One closed ring of [longitude, latitude], first point not repeated (AreaState.ring). */
+export type AreaRing = Array<[number, number]>;
+
+/** What the area layers on DRA's map show (tests and diagnostics). */
+export interface AreaStatus {
+  /** Our area layer ids present on the map, in style order. */
+  layers: string[];
+  /** Corners of the area shown (0 = none). */
+  ringCorners: number;
+  /** Features in the area source as the map holds them. */
+  featureCount: number;
+  drawing: boolean;
+  /** Corners placed so far while drawing. */
+  corners: number;
+  /** The overlay that keeps clicks from DRA is on the page, over the map. */
+  overlay: boolean;
+  /** Times the area data was written to the map source. */
+  dataWrites: number;
+  /** Clicks, drags and wheel turns the overlay took while drawing (none reached DRA). */
+  clicks: number;
+  pans: number;
+  zooms: number;
 }
 
 export type HookToPanel =
@@ -221,6 +310,18 @@ export type HookToPanel =
   | { t: 'block-mapping'; mapping: HookBlockMapping }
   | { t: 'highlight-status'; status: HighlightStatus; reqId?: number }
   | { t: 'paint-result'; reqId: number; result: PaintResult }
+  | { t: 'undo-result'; reqId: number; result: UndoPaintResult }
+  /** The user finished drawing an area on DRA's map (at least 3 corners). Drawing mode is over. */
+  | { t: 'area-drawn'; ring: AreaRing }
+  /**
+   * Drawing stopped without an area: 'cancelled' = Esc on DRA's page; 'unavailable' = there is no
+   * map to draw on, or it lacks what drawing needs (`detail` says which).
+   */
+  | { t: 'area-draw-ended'; reason: 'cancelled' | 'unavailable'; detail?: string }
+  /** A click on the area picker overlay, or null if picking ended without a click. */
+  | { t: 'area-picked'; reqId: number; point: [number, number] | null; detail?: string }
+  /** Answer to 'request-view': the part of DRA's map in view, as a ring of its four corners; null = no map. */
+  | { t: 'view'; reqId: number; ring: AreaRing | null }
   | { t: 'error'; message: string }
   /** From the hook, first thing after every 'hello': it is running, whatever the self-check says. */
   | { t: 'alive'; hookVersion: string; draPresent: boolean; planOpen: boolean; readyState: string; offers: number }
@@ -240,7 +341,25 @@ export type PanelToHook =
   | { t: 'fit'; bbox: BBox }
   | { t: 'probe-highlight'; reqId?: number }
   /** Paint one walkthrough step through DRA's own actions (opt-in, one step per user click). */
-  | { t: 'paint-step'; reqId: number; step: PaintStepRequest };
+  | { t: 'paint-step'; reqId: number; step: PaintStepRequest }
+  /** Undo the latest painted step through DRA's own actionUndo, only while DRA is still at expectedUndoPos. */
+  | { t: 'undo-paint'; reqId: number; req: UndoPaintRequest }
+  /**
+   * Start drawing an area on DRA's map: a transparent overlay over the map takes the clicks (DRA
+   * never sees them), wheel zoom and drag-to-pan still move the map. Ends with 'area-drawn' or
+   * 'area-draw-ended'.
+   */
+  | { t: 'area-draw-start' }
+  /** Reuse the drawing overlay to capture a single click without painting in DRA. */
+  | { t: 'area-pick-start'; reqId: number; kind: 'county' | 'town' }
+  /** Stop drawing (the panel's Cancel), with no message back. */
+  | { t: 'area-draw-cancel' }
+  /** The area outline to show on DRA's map (dashed, very light fill); null = none. */
+  | { t: 'area-show'; ring: AreaRing | null }
+  /** Ask for the part of DRA's map now in view (answered with 'view'). */
+  | { t: 'request-view'; reqId: number }
+  /** County cluster outlines to show on DRA's map, under the area and the highlights; null = none. */
+  | { t: 'clusters-show'; fc: ClusterFC | null };
 
 /** Envelope on the private MessageChannel and the runtime port, so stray messages are ignored. */
 export const ZD_TAG = 'zd/v1';
@@ -263,4 +382,4 @@ export const RUNTIME_PORT_NAME = 'zd-panel';
  * if the relay was not listening yet, the offer is lost. The event lets the hook offer once more.
  */
 export const RELAY_READY_EVENT = 'zd-relay-ready';
-export const HOOK_VERSION = '2';
+export const HOOK_VERSION = '5';

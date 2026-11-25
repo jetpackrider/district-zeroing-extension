@@ -40,6 +40,27 @@ export interface BundleManifest {
    * and which Census geography they come from in this state.
    */
   towns?: BundleFileRef & { count: number; kind: string };
+  /**
+   * Optional sidecar `points.<sha256>.bin.gz`: one point inside each block (the Census internal
+   * point, INTPTLON20 / INTPTLAT20), as 2·n little-endian Int32 in block order: longitude then
+   * latitude, in millionths of a degree. Lets the extension tell which blocks fall in an area the
+   * user marks on the map without loading block shapes.
+   */
+  points?: BundleFileRef;
+  /**
+   * Optional sidecar `names.<sha256>.json.gz`: gzipped JSON { counties: string[], towns: string[] }.
+   * counties[i] names county index i (same order as StateBundle.countyFips), e.g. "Suffolk
+   * County"; towns[t] names town index t (towns[0] = "" for "in no town"), e.g. "Huntington town".
+   * Census names (TIGER / gazetteer NAMELSAD). Lets the panel offer a county or town as an area.
+   */
+  names?: BundleFileRef;
+  /**
+   * Optional sidecar `outlines.<sha256>.json.gz`: gzipped GeoJSON FeatureCollection, one feature
+   * per county (feature `id` = county index, properties.fips), the county's outline dissolved
+   * from its blocks and simplified (~50 m tolerance) for drawing on the map. Small: drawing
+   * county clusters must not need every county's block geometry.
+   */
+  outlines?: BundleFileRef;
   /** One geometry file per county, keyed by 5-digit county FIPS. */
   counties: Array<BundleFileRef & { fips: string; features: number }>;
 }
@@ -84,6 +105,13 @@ export interface StateBundle {
   waterOnly?: Uint8Array;
   /** Town index per block, 1..manifest.towns.count; 0 = in no town. Present when the manifest has a `towns` file. */
   townOf?: Uint32Array;
+  /**
+   * A point inside each block: points[2i] = longitude, points[2i+1] = latitude, in millionths of a
+   * degree. Present when the manifest has a `points` file.
+   */
+  points?: Int32Array;
+  /** County and town names (see BundleManifest.names). Present when the manifest has a `names` file. */
+  names?: { counties: string[]; towns: string[] };
 }
 
 /** Geometry for one county: GeoJSON polygons in WGS84 whose feature `id` and `properties.GEOID20` are the block GEOID. */

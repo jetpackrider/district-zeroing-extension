@@ -42,6 +42,8 @@ export interface PlanCheckInput {
   absorbers?: number[];
   /** With `allowOutsideAbsorb` and no `absorbers`: Unassigned may take or give too. */
   includeUnassigned?: boolean;
+  /** Exact deviation goals for some members, against targets.draTarget (GroupSolveRequest.goals). */
+  goals?: Record<number, -1 | 0 | 1>;
   transfers: Transfer[];
   locked?: Uint8Array;
 }
@@ -148,8 +150,16 @@ export function verifyPlan(input: PlanCheckInput): PlanCheckResult {
   for (let d = 1; d <= k; d++) {
     if (!selected[d]) continue;
     const p = popsAfter[d];
-    const zero = p === targets.q || (targets.remainder > 0 && p === targets.q + 1);
-    if (!zero) issues.push({ kind: 'not-zeroed', district: d, detail: `District ${d} ends at ${p}, not ${targets.q}${targets.remainder > 0 ? ` or ${targets.q + 1}` : ''}` });
+    const goal = input.goals?.[d];
+    if (goal !== undefined) {
+      const want = targets.draTarget + goal;
+      if (p !== want) {
+        issues.push({ kind: 'not-zeroed', district: d, detail: `District ${d} ends at ${p}, not ${want}` });
+      }
+    } else {
+      const zero = p === targets.q || (targets.remainder > 0 && p === targets.q + 1);
+      if (!zero) issues.push({ kind: 'not-zeroed', district: d, detail: `District ${d} ends at ${p}, not ${targets.q}${targets.remainder > 0 ? ` or ${targets.q + 1}` : ''}` });
+    }
   }
 
   // Pieces of districts 1..k only: Unassigned is never required to be contiguous.

@@ -6,6 +6,8 @@ export interface VerificationOptions {
   locked?: Uint8Array;
   /** Apply one-district neighbor tolerance, including the default zero tolerance. */
   neighborTolerance?: number;
+  /** Exact deviation goal against targets.draTarget (DistrictSolveRequest.goal). */
+  goal?: -1 | 0 | 1;
 }
 
 export type VerificationResult = { ok: true } | { ok: false; error: string };
@@ -75,7 +77,9 @@ export function verifySolution(
 
   const afterPop = new Float64Array(numDistricts + 1);
   for (let b = 0; b < n; b++) afterPop[after[b]] += pop[b];
-  const atTarget = (d: number) => afterPop[d] === q || (remainder > 0 && afterPop[d] === q + 1);
+  const atTarget = (d: number) => options.goal !== undefined
+    ? afterPop[d] === draTarget + options.goal
+    : afterPop[d] === q || (remainder > 0 && afterPop[d] === q + 1);
   if (options.districts) {
     for (const district of options.districts) {
       if (!atTarget(district)) return fail(`District ${district} is off target.`);

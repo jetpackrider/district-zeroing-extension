@@ -64,12 +64,12 @@ export function AutoPaintControls({ autoPaint, step, toName, blockedReason, disp
                   : `Moves the ${blocksText} (${formatInt(people)} people) into ${toName}; no shattering or checkmark needed.`}
           </span>
           {disabledWhy && (
-            <span className="zd-autopaint__note" data-testid="paint-step-blocked">
+            <span className="zd-note zd-note--info" data-testid="paint-step-blocked">
               {disabledWhy}
             </span>
           )}
           {!busy && available && reason && (
-            <span className="zd-autopaint__note zd-autopaint__note--warn" role="status" data-testid="paint-step-note">
+            <span className="zd-note zd-note--warn" role="status" data-testid="paint-step-note">
               {reason}
             </span>
           )}
@@ -89,12 +89,12 @@ export function AutoPaintControls({ autoPaint, step, toName, blockedReason, disp
       </label>
       <span className="zd-autopaint__explain">{AUTO_PAINT_EXPLANATION}</span>
       {!available && reason && (
-        <span className="zd-autopaint__note zd-autopaint__note--warn" role="status" data-testid="auto-paint-unavailable">
+        <span className="zd-note zd-note--warn" role="status" data-testid="auto-paint-unavailable">
           {reason}
         </span>
       )}
       {available && !enabled && reason && (
-        <span className="zd-autopaint__note zd-autopaint__note--warn" role="status" data-testid="paint-step-note">
+        <span className="zd-note zd-note--warn" role="status" data-testid="paint-step-note">
           {reason}
         </span>
       )}

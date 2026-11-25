@@ -7,6 +7,11 @@
  */
 import { UNASSIGNED, type Scope, type Solution, type SolveStatus } from '@zd/contracts';
 
+/** Format an exact deviation goal for user-facing messages ("−1", "0", "+1"). */
+export function formatGoal(goal: -1 | 0 | 1): string {
+  return goal > 0 ? `+${goal}` : goal < 0 ? `\u2212${-goal}` : '0';
+}
+
 /** "Unassigned" for district 0, else `name(d)`. */
 export function nameWithUnassigned(name: (d: number) => string): (d: number) => string {
   return (d) => (d === UNASSIGNED ? 'Unassigned' : name(d));
@@ -89,7 +94,8 @@ export function withoutLocked(scope: Scope, lockedDistricts: readonly number[]):
   }
   if (scope.mode === 'one' && scope.with?.some((d) => locked.has(d))) {
     const keep = scope.with.filter((d) => !locked.has(d));
-    return keep.length ? { mode: 'one', district: scope.district, with: keep } : { mode: 'one', district: scope.district };
+    const goal = scope.goal !== undefined ? { goal: scope.goal } : {};
+    return keep.length ? { mode: 'one', district: scope.district, with: keep, ...goal } : { mode: 'one', district: scope.district, ...goal };
   }
   return scope;
 }
@@ -98,19 +104,28 @@ export function withoutLocked(scope: Scope, lockedDistricts: readonly number[]):
  * The scope with its neighbor choice cleaned up: no duplicates, not the district itself, and (when
  * the district's neighbors are known) only districts that touch it. An empty choice is dropped.
  * 0 (Unassigned) stays when it touches the district (the neighbor lists include it then). A group
- * never holds 0: Unassigned is not a district.
+ * never holds 0: Unassigned is not a district. A valid `goal` (-1, 0 or +1) is kept.
  */
 export function sanitizeScope(scope: Scope, neighborsOf: (d: number) => readonly number[] | undefined): Scope {
   if (scope.mode === 'group') {
     const districts = scope.districts.filter((d) => d !== UNASSIGNED);
     return districts.length === scope.districts.length ? scope : { ...scope, districts };
   }
-  if (scope.mode !== 'one' || scope.with === undefined) return scope;
+  if (scope.mode !== 'one') return scope;
+  const validGoal = scope.goal === -1 || scope.goal === 0 || scope.goal === 1 ? scope.goal : undefined;
+  const goal = validGoal !== undefined ? { goal: validGoal } : {};
+  if (scope.with === undefined) {
+    return validGoal === scope.goal && (validGoal !== undefined || !('goal' in scope))
+      ? scope
+      : { mode: 'one', district: scope.district, ...goal };
+  }
   const nbrs = neighborsOf(scope.district);
   const keep = [...new Set(scope.with)]
     .filter((d) => Number.isInteger(d) && d >= 0 && d !== scope.district && (!nbrs || nbrs.includes(d)))
     .sort((a, b) => a - b);
-  return keep.length ? { mode: 'one', district: scope.district, with: keep } : { mode: 'one', district: scope.district };
+  return keep.length
+    ? { mode: 'one', district: scope.district, with: keep, ...goal }
+    : { mode: 'one', district: scope.district, ...goal };
 }
 
 /**
@@ -120,10 +135,11 @@ export function sanitizeScope(scope: Scope, neighborsOf: (d: number) => readonly
  * neighbors are absorbers, so no other district is affected. `chosenDeviations` are the real
  * districts' only: Unassigned has no deviation and no limit.
  */
-export function choiceTolerance(districtDeviation: number, chosenDeviations: readonly number[]): number {
+export function choiceTolerance(districtDeviation: number, chosenDeviations: readonly number[], goal?: -1 | 0 | 1): number {
   const worst = chosenDeviations.reduce((m, d) => Math.max(m, Math.abs(d)), 0);
-  // +1: zero means q or q + 1, which can be one person away from DRA's rounded target.
-  return worst + Math.abs(districtDeviation) + 1;
+  // Without a goal, zero means q or q + 1, which can be one person away from DRA's rounded target.
+  const need = goal !== undefined ? Math.abs(districtDeviation - goal) : Math.abs(districtDeviation) + 1;
+  return worst + need;
 }
 
 /** What a one-district solve asks the worker for, from the scope, the locks and Unassigned. */
@@ -152,6 +168,7 @@ export interface OneDistrictTrade {
 export function oneDistrictTrade(o: {
   district: number;
   with?: readonly number[];
+  goal?: -1 | 0 | 1;
   neighbors: readonly number[] | undefined;
   lockedDistricts: readonly number[];
   unassignedPop: number;
@@ -164,7 +181,7 @@ export function oneDistrictTrade(o: {
   const chosen = o.with?.length ? o.with.filter((d) => !locked.has(d) && (nbrs?.includes(d) ?? true)) : [];
   if (chosen.length) {
     const real = chosen.filter((d) => d !== UNASSIGNED);
-    return { chosen, absorbers: chosen, neighborTolerance: choiceTolerance(o.deviationOf(o.district), real.map(o.deviationOf)) };
+    return { chosen, absorbers: chosen, neighborTolerance: choiceTolerance(o.deviationOf(o.district), real.map(o.deviationOf), o.goal) };
   }
   const unassignedOpen = o.unassignedPop > 0;
   if (locked.size && nbrs) {
@@ -177,7 +194,7 @@ export function oneDistrictTrade(o: {
       return {
         chosen,
         error:
-          o.deviationOf(o.district) > 0
+          o.deviationOf(o.district) - (o.goal ?? 0) > 0
             ? `Every district next to ${who} is locked. ${who} also touches unassigned blocks, but no one is unassigned, so "Any neighbor" leaves them out. Pick Unassigned to give blocks to it, or unlock one of its neighbors.`
             : `Every district next to ${who} is locked, and the unassigned blocks it touches hold no people, so there is no one to take. Unlock one of its neighbors.`,
       };
@@ -199,6 +216,7 @@ export function joinDistrictNames(ds: readonly number[], name: (d: number) => st
 export function solveDistrictMessage(o: {
   district: number;
   chosen: readonly number[];
+  goal?: -1 | 0 | 1;
   /** Options or plans shown. */
   shown: number;
   status: SolveStatus;
@@ -219,7 +237,8 @@ export function solveDistrictMessage(o: {
       : 'No one-way move hits the number, so these plans trade across a border in both directions or through other neighbors. Paint the steps in order: after the first leg both districts sit further from zero until the return leg is painted.';
   }
   if (!chosen.length || o.status === 'already-zero' || o.status === 'error') return message;
-  const none = `No way to zero ${name(o.district)} trading only with ${chosenNames} was found.`;
+  const targetPhrase = o.goal !== undefined ? `bring ${name(o.district)} to ${formatGoal(o.goal)}` : `zero ${name(o.district)}`;
+  const none = `No way to ${targetPhrase} trading only with ${chosenNames} was found.`;
   if (dropped && dropped.plans > 0) {
     const n = dropped.plans;
     const what = dropped.fallback ? (n === 1 ? 'plan' : 'plans') : n === 1 ? 'option' : 'options';

@@ -9,6 +9,7 @@
 
 import type { GroupFeasibility, InteractionGraph, SolutionKind, SolutionStats, DeviationChange } from './engine';
 import type { PopField } from './bundle';
+import type { Clustering } from './clusters';
 
 export interface DistrictRow {
   /** DRA district index, 1-based. 0 (Unassigned) is never listed. */
@@ -35,8 +36,12 @@ export type Scope =
    * `with` may contain 0 (Unassigned): give blocks to it, or take unassigned blocks.
    * "Any neighbor" includes Unassigned only while it holds people (PanelState.unassigned.pop > 0,
    * a map still being drawn); on a finished map it is used only when picked.
+   * `goal` is the deviation to end at, exactly, against DRA's displayed target (the number in
+   * DRA's Deviation column): -1, 0 or +1. Absent = "Zero", the usual rule (q or q + 1, see
+   * PopTargets). Kept when the same district is picked again, like `with`; reset for another
+   * district. Group and whole-map scopes have no goal.
    */
-  | { mode: 'one'; district: number; with?: number[] }
+  | { mode: 'one'; district: number; with?: number[]; goal?: -1 | 0 | 1 }
   | { mode: 'group'; districts: number[]; allowOutsideAbsorb: boolean }
   | { mode: 'all' };
 
@@ -124,6 +129,42 @@ export interface WalkthroughState {
   mapMode: 'dra' | 'mini';
 }
 
+/**
+ * The area of the map where the user would like the swap to happen. They draw it on DRA's map
+ * (click to add corners; double-click, or click the first corner, to finish; Esc cancels) or take
+ * the part of the map in view. Remembered per map, like locks. Changing it, or its mode, drops the
+ * options on offer (they were found for the old area). It cannot change during a walkthrough.
+ */
+export interface AreaState {
+  /** The outline as drawn: one closed ring of [longitude, latitude], first point not repeated. Absent while drawing a first area, and for a region. */
+  ring?: Array<[number, number]>;
+  /**
+   * When the area is a whole county or town rather than a drawn shape: every block in it ("find
+   * balance in this county / town"). `index` is the bundle's county index or town index; `name`
+   * as in the bundle's names. `ring` is absent then. Remembered per map like a drawn area.
+   */
+  region?: { kind: 'county' | 'town'; index: number; name: string };
+  /**
+   * When the area is a county cluster (clusters-use-as-area): every block of these counties
+   * (bundle county indexes). `ring` and `region` are absent then. Remembered per map like the others.
+   */
+  cluster?: { name: string; counties: number[] };
+  /** True while waiting for a click on DRA's map to pick a county or town (area-pick-region). */
+  picking?: 'county' | 'town';
+  /** How the solver treats it (AreaPreference.mode). Default 'prefer'. */
+  mode: 'prefer' | 'only';
+  /** Blocks and people inside, once the state's data (with block points) is loaded. */
+  blocks?: number;
+  people?: number;
+  /** True while the user is drawing on the map. */
+  drawing: boolean;
+  /**
+   * Why an area cannot be used or drawn right now, when it can't: e.g. the state's data has no
+   * block points, or there is no DRA map to draw on (then "Use map view" may still work).
+   */
+  unavailable?: string;
+}
+
 export interface PanelState {
   connection: ConnectionStatus;
   /** One-line banner, e.g. the unsupported-map reason or a data-mismatch warning. */
@@ -165,6 +206,40 @@ export interface PanelState {
    */
   autoPaint?: { available: boolean; enabled: boolean; busy?: boolean; reason?: string };
   /**
+   * County clusters (see contracts/clusters.ts). Absent until the user opens the tool. The
+   * district count defaults to the open map's; the user may enter another (e.g. plan a 120-seat
+   * House while a congressional map is open).
+   */
+  clusters?: {
+    status: 'idle' | 'finding' | 'done' | 'none' | 'error';
+    numDistricts: number;
+    /** Fraction, e.g. 0.05 for ±5%. */
+    tolerance: number;
+    /** People per district for numDistricts. */
+    districtSize?: number;
+    results: Array<Clustering & { countyNames: string[][] }>;
+    exhaustive?: boolean;
+    message?: string;
+    elapsedMs?: number;
+    /** The clustering (and cluster) highlighted on the map. */
+    hovered?: { id: string; cluster?: number };
+  };
+  /** The area the user marked for the swap; absent = none (anywhere). See AreaState. */
+  area?: AreaState;
+  /**
+   * Counties and towns the user can pick as an area, sorted by name. Present once the state's
+   * data is loaded; `towns` is empty when the data has no towns or no names.
+   */
+  regions?: { counties: Array<{ index: number; name: string }>; towns: Array<{ index: number; name: string }> };
+  /**
+   * What the panel's Undo would undo right now; absent = nothing to undo. Only the extension's
+   * own changes: a step it painted for the user (undone through DRA's own Undo, and only while
+   * that paint is still the latest edit in DRA's undo history), or a panel change that threw
+   * something away (Unlock all, Lock the N at zero, clearing or replacing an area). Hand-painted
+   * edits are DRA's to undo.
+   */
+  undo?: { kind: 'paint' | 'setting'; label: string };
+  /**
    * Districts the user locked (finished ones, usually). No suggestion moves a block into or out
    * of a locked district: it is never a neighbor that absorbs, and group and whole-map plans leave
    * it out. Remembered per map. Absent = none. Never contains 0 (Unassigned).
@@ -174,6 +249,28 @@ export interface PanelState {
 
 export type PanelAction =
   | { type: 'set-scope'; scope: Scope }
+  /** Start drawing an area on DRA's map (see AreaState). Finishing replaces any existing area. */
+  | { type: 'area-draw' }
+  /** Stop drawing without changing the area. */
+  | { type: 'area-cancel-draw' }
+  /** Make the part of the map now in view (DRA's map, or the mini-map) the area. */
+  | { type: 'area-use-view' }
+  /** Make a whole county or town the area (from PanelState.regions). */
+  | { type: 'area-use-region'; kind: 'county' | 'town'; index: number }
+  /** The next click on DRA's map picks the county or town there as the area; Esc cancels. */
+  | { type: 'area-pick-region'; kind: 'county' | 'town' }
+  /** Find county clusters for this many districts and tolerance (fraction). */
+  | { type: 'clusters-find'; numDistricts: number; tolerance: number }
+  | { type: 'clusters-cancel' }
+  /** Highlight a clustering (all its clusters) or one cluster of it on the map; null clears. */
+  | { type: 'clusters-hover'; id: string | null; cluster?: number }
+  /** Make one cluster the swap area (sets AreaState.cluster with its counties listed). */
+  | { type: 'clusters-use-as-area'; id: string; cluster: number }
+  /** Undo what PanelState.undo describes. Ignored when it is absent. */
+  | { type: 'undo' }
+  /** Remove the area: moves may happen anywhere again. */
+  | { type: 'area-clear' }
+  | { type: 'set-area-mode'; mode: 'prefer' | 'only' }
   /** Lock or unlock districts (see PanelState.lockedDistricts). Ignored during a walkthrough. */
   | { type: 'set-district-lock'; districts: number[]; locked: boolean }
   | { type: 'solve' }

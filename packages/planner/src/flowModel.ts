@@ -33,10 +33,12 @@ export const FLOW_PARAMS: Record<Exclude<SolutionKind, 'single'>, FlowCostParams
 export interface FlowModelInput {
   /** Selected districts, sorted. */
   members: number[];
-  /** pop - q per selected district. */
+  /** pop - targetBase per selected district. */
   supply: Map<number, number>;
   /** 1 if a district may keep q + 1. */
   hi: 0 | 1;
+  /** Per-member upper slack (0 = exact goal, 1 = may keep +1). Defaults to `hi` for every member. */
+  memberHi?: ReadonlyMap<number, 0 | 1>;
   /** Directed borders to offer, [from, to]. Both directions should be listed. */
   borders: Array<[number, number]>;
   curves: CurveMap;
@@ -128,8 +130,9 @@ export function planFlow(input: FlowModelInput): FlowPlan {
   const meta: ArcMeta[] = [];
   /** Total offered capacity per directed border (for the first slope-scaling round). */
   const borderCap = new Map<number, number>();
-  if (hi) {
-    for (const d of members) {
+  for (const d of members) {
+    const mHi = input.memberHi?.get(d) ?? hi;
+    if (mHi) {
       arcs.push({ from: nodeOf.get(d)!, to: T, cap: 1, cost: 0 });
       meta.push({ type: 'extra', d });
     }
@@ -144,7 +147,8 @@ export function planFlow(input: FlowModelInput): FlowPlan {
       .sort((a, b) => a.costPerPerson - b.costPerPerson || a.i - b.i);
     let remaining = input.caps.has(pairKey(from, to)) ? input.caps.get(pairKey(from, to))! : Infinity;
     const toSupply = supply.get(to);
-    const relay = toSupply !== undefined && toSupply >= 0 && toSupply <= hi ? params.relayPenalty : 0;
+    const toHi = input.memberHi?.get(to) ?? hi;
+    const relay = toSupply !== undefined && toSupply >= 0 && toSupply <= toHi ? params.relayPenalty : 0;
     for (const t of tiers) {
       if (remaining <= 0) break;
       const cap = Math.min(t.people, remaining);

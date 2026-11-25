@@ -8,6 +8,7 @@
  * and is 3 over with no remainder; its only neighbour, district 2, is 3 under. No one-way move works.
  */
 import { test, expect, type Page } from '@playwright/test';
+import { HOOK_VERSION } from '../../src/shared/protocol';
 import { closePages, debug, dispatch, isZeroedPop, launch, openDra, openPanel, paintStep, playWalkthrough, probe, ready, solveOne, state, until, waitState, type Harness } from './harness';
 
 let h: Harness;
@@ -322,7 +323,7 @@ test('diagnostics footer shows the self-check, hook version, field, target, data
   await panel.getByTestId('diagnostics').locator('summary').click();
   const text = panel.getByTestId('diagnostics-text');
   await expect(text).toContainText('all required hooks OK');
-  await expect(text).toContainText('hook protocol: 2');
+  await expect(text).toContainText(`hook protocol: ${HOOK_VERSION}`);
   await expect(text).toContainText('dataset field (primeDDS): D20F via datasetContext.primeDDS');
   await expect(text).toContainText('population field read: D20F');
   await expect(text).toContainText(/target read: [\d,]+/);

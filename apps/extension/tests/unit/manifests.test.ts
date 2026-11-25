@@ -49,12 +49,23 @@ describe('local build (run `npm run build:local` first)', () => {
     for (const st of states) {
       const manifest = JSON.parse(readFileSync(join(dataDir, st, 'manifest.json'), 'utf8'));
       expect(manifest.state).toBe(st);
-      const optional = [manifest.water, manifest.towns].filter(Boolean);
+      const optional = [manifest.water, manifest.towns, manifest.points, manifest.names, manifest.outlines].filter(Boolean);
       const want = ['manifest.json', manifest.attrs.file, ...optional.map((r: any) => r.file), ...manifest.counties.map((c: any) => c.file)].sort();
       expect(readdirSync(join(dataDir, st)).sort()).toEqual(want);
       for (const ref of [manifest.attrs, ...optional, ...manifest.counties]) {
         expect(readFileSync(join(dataDir, st, ref.file)).byteLength).toBe(ref.bytes);
       }
+    }
+  });
+  it.skipIf(!existsSync(out(dir)))('embeds the county outlines sidecar of each state that has one', () => {
+    const dataDir = join(root, dir, 'data');
+    for (const st of readdirSync(dataDir)) {
+      const source = JSON.parse(readFileSync(join(root, '../../data', st, 'manifest.json'), 'utf8'));
+      const manifest = JSON.parse(readFileSync(join(dataDir, st, 'manifest.json'), 'utf8'));
+      expect(manifest.outlines).toEqual(source.outlines);
+      if (!source.outlines) continue;
+      expect(manifest.outlines.file).toMatch(/^outlines\.[a-f0-9]{64}\.json\.gz$/);
+      expect(readFileSync(join(dataDir, st, manifest.outlines.file)).byteLength).toBe(manifest.outlines.bytes);
     }
   });
 });

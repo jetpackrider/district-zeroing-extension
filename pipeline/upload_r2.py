@@ -23,9 +23,12 @@ def upload(state, bucket, endpoint):
     if manifest["state"] != state or manifest["stateFips"] != STATES[state] or manifest["format"] != 1:
         raise ValueError("Manifest does not describe the requested state or supported format")
     objects = [(manifest["attrs"], "attrs", ".bin.gz")]
-    for sidecar in ("water", "towns"):
+    for sidecar in ("water", "towns", "points"):
         if sidecar in manifest:
             objects.append((manifest[sidecar], sidecar, ".bin.gz"))
+    for sidecar in ("names", "outlines"):
+        if sidecar in manifest:
+            objects.append((manifest[sidecar], sidecar, ".json.gz"))
     for county in manifest["counties"]:
         if re.fullmatch(STATES[state] + r"[0-9]{3}", county["fips"]) is None:
             raise ValueError("Invalid county FIPS in manifest")

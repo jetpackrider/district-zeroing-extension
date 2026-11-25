@@ -115,6 +115,21 @@ It uses the same county, town and perimeter weights as the other variants. Flow 
 small per-person premium for the tiers that allow splits because the witness cost is averaged
 over the whole capacity tier.
 
+## County clusters
+
+`findCountyClusters(req)` (src/clusters.ts, contract in packages/contracts/src/clusters.ts) splits a
+state into groups of whole, contiguous counties, each holding a whole number k ≥ 1 of districts
+within the tolerance, as North Carolina's legislative maps require: most clusters first, then the
+smallest worst deviation, then the smallest largest cluster. Counties touch when any of their blocks
+do, water and DRA's links included (county lines run through rivers and sounds). The search is exact
+(pruned enumeration of the cluster holding one county, pieces solved independently and memoized by
+county set and district count, bounded by LP-dual county weights) and falls back to greedy peeling
+plus large-neighbourhood search when the time limit (default 10 s) runs out; `exhaustive` is true
+only when the exact search finished. The district counts are chosen so they add up to
+`numDistricts` (not automatic: 20 counties of 1.05 districts hold 21). `verifyClustering` checks a
+result independently. `tsx scripts/clusters-real.ts` runs it on real bundles (`--list` prints the
+clusters, `--log` the phases).
+
 ## Tests
 
 `npm test` uses a reference `BorderSolver` (test/support/refSolver.ts) on seeded synthetic grids

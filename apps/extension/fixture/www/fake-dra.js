@@ -10,6 +10,7 @@
  *   ?noplan=1           window.dra exists but no map is open (dra.model() returns undefined), like
  *                       DRA's map list; window.fakeDra.openPlan() opens it later
  *   ?nomap=1            no env.theMap and no window.mapboxgl (map handle missing -> mini-map fallback)
+ *   ?nopan=1            the map has no panBy (what area drawing uses), the rest of it works
  *   ?break=<name>       break one hook: dra | fullBlockMap | blockMapping | aggregates | clientSession
  *   ?shapes=2010_VD     2010-shape map            ?restrict=county | city   county/city map
  *   ?mmd=1              multi-member districts    ?unequal=1   unequal targets
@@ -26,6 +27,12 @@
  * (`fixContiguity` is recorded and cleared, but non-contiguous splits are not re-split).
  *
  * Like DRA, district aggregates are cached and updated as blocks change (not recomputed on every read).
+ *
+ * Paint brush: with fakeDra.setBrush(d), a click on the map paints the precinct under the pointer
+ * into district d, as DRA's paint tool does. Presses and clicks that reach the map are counted
+ * (fakeDra.mapEvents()) whether or not a brush is set: the area tests check that drawing an area
+ * never lets one through. fakeDra.wipeMapDom() drops every element on the map container that is not
+ * the map's own, like a React re-render of DRA's map pane.
  */
 (function () {
   const qs = new URLSearchParams(location.search);
@@ -291,6 +298,8 @@
     let readonly = !!opt('readonly');
     /** Test switch: make the next paint action misbehave once ('extra' | 'wrong' | 'noop' | 'throw' | 'no-undo'). */
     let sabotage = null;
+    /** Test switch: make the next actionUndo misbehave once ('extra' | 'wrong' | 'noop' | 'throw'). */
+    let undoSabotage = null;
     const calls = [];
 
     /** Applies committed feature edits the way DRA's OT map does (0 = delete), then re-renders. */
@@ -474,6 +483,26 @@
         if (meta.fixContiguity) setTimeout(() => this.actionSetRedistrictProps({ fixContiguity: false, noundo: true }), 150);
       },
       actionUndo() {
+        const mode = undoSabotage;
+        undoSabotage = null;
+        if (mode === 'throw') throw new Error('fake DRA: undo failed (test)');
+        if (mode === 'noop') return;
+        if (mode === 'wrong' || mode === 'extra') {
+          this.undoredo.undo();
+          if (mode === 'extra') {
+            const other = Object.keys(committed).find((k) => rev[k]);
+            if (other) applyFeatureEdits({ [other]: (committed[other] % nDistricts) + 1 });
+          } else {
+            const top = this.undoredo.stack[this.undoredo.cur];
+            const first = top?.redo?.[0]?.arg?.blockMap;
+            if (first) {
+              const bad = {};
+              for (const k in first) if (first[k]) bad[k] = (first[k] % nDistricts) + 1;
+              if (Object.keys(bad).length) applyFeatureEdits(bad);
+            }
+          }
+          return;
+        }
         this.undoredo.undo();
       },
       actionRedo() {
@@ -534,6 +563,7 @@
     const Lib = window.mapboxgl || window.maplibregl;
     const map = new Lib.Map({ container: 'map', style: styleA, center: plan.center, zoom: real ? 9 : 11, attributionControl: false, fadeDuration: 0 });
     window.__fakeMap = map;
+    if (opt('nopan')) map.panBy = undefined;
     if (!opt('nomap')) env.theMap = map;
 
     function blocksFC() {
@@ -576,6 +606,23 @@
     });
     /** DRA's basemap switch: drop every dra- layer, setStyle(diff:false), redraw on style.load. */
     let basemap = 'a';
+    // --- DRA's paint tool (see the header) -----------------------------------------------
+    let brush = null;
+    const mapEvents = { mousedown: 0, click: 0, dblclick: 0, canvasPointerdown: 0 };
+    map.on('mousedown', () => mapEvents.mousedown++);
+    map.on('dblclick', () => mapEvents.dblclick++);
+    map.on('click', (e) => {
+      mapEvents.click++;
+      if (brush === null || !rings) return;
+      const f = map.queryRenderedFeatures(e.point, { layers: ['dra-fill'] })[0];
+      if (f) paintPrecinct(precinctOf(f.properties.geoid), brush);
+    });
+    map.getCanvas().addEventListener('pointerdown', () => mapEvents.canvasPointerdown++);
+    function wipeMapDom() {
+      const el = map.getContainer();
+      for (const c of [...el.children]) if (!/maplibregl|mapboxgl/.test(c.className)) c.remove();
+    }
+
     function switchBasemap() {
       for (const l of map.getStyle().layers) if (/^dra-/.test(l.id)) map.removeLayer(l.id);
       if (map.getSource('dra-blocks')) map.removeSource('dra-blocks');
@@ -614,7 +661,13 @@
       for (const k of Object.keys(committed)) if (k.startsWith(`B_${pid}_`)) delete committed[k];
     }
     function commit() {
-      for (const pid of Object.keys(sm.shatterMap)) {
+      const pids = Object.keys(sm.shatterMap);
+      const beforeMap = {};
+      const afterMap = {};
+      for (const pid of pids) {
+        const oldKeys = [];
+        if (committed[pid] !== undefined) oldKeys.push(pid);
+        for (const k of vfeaturesOf(pid)) oldKeys.push(k);
         const byD = new Map();
         for (const g of rev[pid]) {
           const d = sm.blockmap[g] ?? 0;
@@ -622,13 +675,33 @@
           byD.get(d).push(g);
           delete sm.blockmap[g];
         }
-        dropCommitted(pid);
         // DRA's OT map deletes a 0 (Unassigned): erased blocks have no feature at all.
+        const nextKeys = {};
         if (byD.size === 1) {
           const d = [...byD.keys()][0];
-          if (d) committed[pid] = d;
-        } else for (const [d, gs] of byD) if (d) committed[`B_${pid}_${encodeBitset(rev[pid], gs)}`] = d;
+          if (d) nextKeys[pid] = d;
+        } else for (const [d, gs] of byD) if (d) nextKeys[`B_${pid}_${encodeBitset(rev[pid], gs)}`] = d;
+        for (const k of oldKeys) {
+          if (nextKeys[k] !== committed[k]) {
+            beforeMap[k] = committed[k];
+            afterMap[k] = nextKeys[k] ?? 0;
+          }
+        }
+        for (const k of Object.keys(nextKeys)) {
+          if (committed[k] !== nextKeys[k]) {
+            beforeMap[k] = committed[k] ?? 0;
+            afterMap[k] = nextKeys[k];
+          }
+        }
+        dropCommitted(pid);
+        for (const k of Object.keys(nextKeys)) committed[k] = nextKeys[k];
         delete sm.shatterMap[pid];
+      }
+      if (Object.keys(afterMap).length) {
+        model.undoredo.push({
+          undo: [{ id: SET_FEATURE_DISTRICTS, arg: { blockMap: JSON.parse(JSON.stringify(beforeMap)) } }],
+          redo: [{ id: SET_FEATURE_DISTRICTS, arg: { blockMap: JSON.parse(JSON.stringify(afterMap)) } }],
+        });
       }
       blockStamp++;
       sm.localBlockStamp++;
@@ -637,9 +710,31 @@
     }
     /** The paint tool on a whole precinct; d = 0 is the eraser (DRA deletes the feature). */
     function paintPrecinct(pid, d) {
+      const oldKeys = [];
+      if (committed[pid] !== undefined) oldKeys.push(pid);
+      for (const k of vfeaturesOf(pid)) oldKeys.push(k);
+      const beforeMap = {};
+      const afterMap = {};
+      for (const k of oldKeys) {
+        const nextVal = k === pid ? d : 0;
+        if (committed[k] !== nextVal) {
+          beforeMap[k] = committed[k];
+          afterMap[k] = nextVal;
+        }
+      }
+      if (d && committed[pid] !== d) {
+        beforeMap[pid] = committed[pid] ?? 0;
+        afterMap[pid] = d;
+      }
       dropCommitted(pid);
       if (d) committed[pid] = d;
       for (const g of rev[pid]) setDist(idx.get(g), d);
+      if (Object.keys(afterMap).length) {
+        model.undoredo.push({
+          undo: [{ id: SET_FEATURE_DISTRICTS, arg: { blockMap: JSON.parse(JSON.stringify(beforeMap)) } }],
+          redo: [{ id: SET_FEATURE_DISTRICTS, arg: { blockMap: JSON.parse(JSON.stringify(afterMap)) } }],
+        });
+      }
       blockStamp++;
       clientSession.fire('state', {});
       rerender();
@@ -670,6 +765,9 @@
       sabotageNextPaint(mode) {
         sabotage = mode;
       },
+      sabotageNextUndo(mode) {
+        undoSabotage = mode;
+      },
       undo: () => model.actionUndo(),
       redo: () => model.actionRedo(),
       undoDepth: () => model.undoredo.cur,
@@ -683,6 +781,11 @@
       commit,
       rerender,
       switchBasemap,
+      setBrush(d) {
+        brush = d === null || d === undefined ? null : Number(d);
+      },
+      mapEvents: () => ({ ...mapEvents }),
+      wipeMapDom,
       updatePrecincts,
       openPlan,
       closePlan,

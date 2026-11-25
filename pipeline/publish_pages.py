@@ -23,7 +23,7 @@ def stage(state, out):
     manifest = json.loads(manifest_data)
     if manifest["state"] != state or manifest["stateFips"] != STATES[state] or manifest["format"] != 1:
         raise ValueError(f"{state}: manifest does not describe this state or a supported format")
-    refs = [manifest["attrs"], *(manifest[key] for key in ("water", "towns") if key in manifest), *manifest["counties"]]
+    refs = [manifest["attrs"], *(manifest[key] for key in ("water", "towns", "points", "names", "outlines") if key in manifest), *manifest["counties"]]
     target = out / VERSION / state
     target.mkdir(parents=True, exist_ok=True)
     total = 0

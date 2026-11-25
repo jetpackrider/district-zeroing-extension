@@ -41,9 +41,13 @@ const demoMiniMapRenderer: MiniMapRenderer = (container) => {
 };
 
 export function DevHarness() {
-  const [scenarioId, setScenarioId] = useState<ScenarioId>('live-group-chain');
-  const [panelWidth, setPanelWidth] = useState<number>(360);
-  const [theme, setTheme] = useState<'system' | 'light' | 'dark'>('system');
+  const query = new URLSearchParams(window.location.search);
+  const initialScenario = SCENARIO_LIST.find(({ id }) => id === query.get('scenario'))?.id ?? 'live-group-chain';
+  const width = Number(query.get('width'));
+  const appearance = query.get('theme');
+  const [scenarioId, setScenarioId] = useState<ScenarioId>(initialScenario);
+  const [panelWidth, setPanelWidth] = useState<number>(Number.isFinite(width) && width > 0 ? Math.min(700, Math.max(300, width)) : 360);
+  const [theme, setTheme] = useState<'system' | 'light' | 'dark'>(appearance === 'light' || appearance === 'dark' ? appearance : 'system');
   const [autoTick, setAutoTick] = useState(false);
   const [actionLog, setActionLog] = useState<ActionLogEntry[]>([]);
 
@@ -57,8 +61,10 @@ export function DevHarness() {
   }, []);
 
   const controller = useMemo(
-    () => new MockController({ initialScenario: 'live-group-chain', onAction: handleAction }),
-    [handleAction],
+    // "Draw area" finishes by itself after a moment, as if corners had been clicked on the map.
+    // "Find clusters" likewise finishes after a moment.
+    () => new MockController({ initialScenario, onAction: handleAction, areaDrawMs: 2500, clusterFindMs: 1500 }),
+    [initialScenario, handleAction],
   );
 
   useEffect(() => {
@@ -91,6 +97,16 @@ export function DevHarness() {
     }
     return [...map.entries()];
   }, []);
+
+  if (query.get('bare') === '1') {
+    return (
+      <div style={{ width: panelWidth }}>
+        <ThemeFrame theme={theme}>
+          <Panel controller={controller} renderMiniMap={demoMiniMapRenderer} />
+        </ThemeFrame>
+      </div>
+    );
+  }
 
   return (
     <div className="harness-shell" data-harness-theme={theme}>
@@ -180,6 +196,9 @@ export function DevHarness() {
             </button>
             <button type="button" onClick={() => controller.injectStrayEdit()}>
               Stray edit
+            </button>
+            <button type="button" onClick={() => controller.finishAreaDraw()}>
+              Finish area drawing
             </button>
             <button
               type="button"

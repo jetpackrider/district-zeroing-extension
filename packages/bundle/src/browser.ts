@@ -1,6 +1,6 @@
 import type { BundleFileRef, BundleSource, CountyGeometry, StateBundle } from '@zd/contracts';
-import { cached } from './cache';
-import { decodeAttrs, decodeCounty, decodeManifest, decodeTowns, decodeWater, stateCode } from './decode';
+import { cached, withPoints, type BundleReadOptions } from './cache';
+import { decodeAttrs, decodeCounty, decodeManifest, decodeNames, decodeOutlines, decodePoints, decodeTowns, decodeWater, stateCode, type CountyOutlines } from './decode';
 
 type Progress = (loaded: number, total: number) => void;
 const STORE = 'files';
@@ -69,11 +69,44 @@ export class BrowserBundleSource implements BundleSource {
   private readonly baseUrl: URL;
   private readonly states = new Map<string, Promise<StateBundle>>();
   private readonly counties = new Map<string, Promise<CountyGeometry>>();
+  private readonly pointLoads = new Map<string, Promise<Int32Array | undefined>>();
+  private readonly outlineLoads = new Map<string, Promise<CountyOutlines>>();
   private database?: Promise<IDBDatabase | undefined>;
+  private readonly options: Required<BundleReadOptions>;
 
-  constructor(baseUrl: string | URL) {
+  constructor(baseUrl: string | URL, options: BundleReadOptions = {}) {
     this.baseUrl = new URL(baseUrl, globalThis.location?.href);
     if (!this.baseUrl.pathname.endsWith('/')) this.baseUrl.pathname += '/';
+    this.options = { points: options.points ?? 'with-state' };
+  }
+
+  /**
+   * The points sidecar (BundleManifest.points) of a loaded state, read on first call and kept on
+   * `bundle.points`; undefined when the manifest has none. Rejects on a bad file (the state itself
+   * stays loaded). With `points: 'on-demand'` this is the only way the points are read.
+   */
+  loadPoints(bundle: StateBundle): Promise<Int32Array | undefined> {
+    if (bundle.points) return Promise.resolve(bundle.points);
+    const ref = bundle.manifest.points;
+    if (!ref) return Promise.resolve(undefined);
+    return cached(this.pointLoads, ref.file, async () => {
+      const points = decodePoints(await this.loadFile(bundle.manifest.state, ref), bundle.n);
+      bundle.points = points;
+      return points;
+    });
+  }
+
+  /**
+   * The county outlines sidecar (BundleManifest.outlines) of a loaded state: one simplified outline
+   * per county for drawing, read only when asked (loadState never reads it), verified by size and
+   * SHA-256 and cached like the other files. Undefined when the manifest has none; rejects on a bad
+   * file, and a later call tries again.
+   */
+  loadOutlines(bundle: StateBundle): Promise<CountyOutlines | undefined> {
+    const ref = bundle.manifest.outlines;
+    if (!ref) return Promise.resolve(undefined);
+    return cached(this.outlineLoads, ref.file, async () =>
+      decodeOutlines(await this.loadFile(bundle.manifest.state, ref), bundle.countyFips));
   }
 
   async loadState(state: string, onProgress?: Progress): Promise<StateBundle> {
@@ -94,6 +127,10 @@ export class BrowserBundleSource implements BundleSource {
       const bundle = decodeAttrs(data, manifest);
       if (manifest.water) bundle.waterOnly = decodeWater(await this.loadFile(code, manifest.water), bundle.n);
       if (manifest.towns) bundle.townOf = decodeTowns(await this.loadFile(code, manifest.towns), bundle.n, manifest.towns.count);
+      if (manifest.names) {
+        bundle.names = decodeNames(await this.loadFile(code, manifest.names), bundle.countyFips.length, manifest.towns?.count ?? 0);
+      }
+      if (this.options.points === 'with-state') await withPoints(bundle, (b) => this.loadPoints(b));
       return bundle;
     });
   }

@@ -5,8 +5,8 @@ interface AboutViewProps {
 export function AboutView({ onClose }: AboutViewProps) {
   return (
     <div className="zd-about" data-testid="about-view">
-      <div className="zd-section-head" style={{ marginBottom: 0 }}>
-        <h2 style={{ margin: 0 }}>About Zero-Deviation Helper</h2>
+      <div className="zd-section-head">
+        <h2>About Zero-Deviation Helper</h2>
         <button type="button" className="zd-btn zd-btn--sm" onClick={onClose}>
           ← Back
         </button>

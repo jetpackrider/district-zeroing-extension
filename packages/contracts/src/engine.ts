@@ -56,6 +56,25 @@ export type Assignment = Uint16Array;
  */
 export const UNASSIGNED = 0;
 
+/**
+ * An area of the map where the user would like the swap to happen (they mark it on the map; see
+ * PanelState.area). `inside[b] = 1` for each block in the area. It applies to the blocks that
+ * move, whichever side of a transfer they come from.
+ *  - 'only': no block outside the area moves, exactly as if every outside block were locked. If
+ *    nothing can be done inside, nothing is returned, with a message saying the area is the reason.
+ *  - 'prefer': every option or plan that moves only blocks inside the area comes before any that
+ *    moves a block outside. When fewer than the requested number exist inside (or none), options
+ *    that go outside fill the remaining places, fewest outside blocks first, and say so in
+ *    `SolutionStats.outsideArea`.
+ * Ordering when several preferences apply: inside the area first, then a real neighbor brought
+ * closer to zero before Unassigned (see UNASSIGNED), then cost.
+ */
+export interface AreaPreference {
+  /** Length graph.n; 1 = inside the area. */
+  inside: Uint8Array;
+  mode: 'prefer' | 'only';
+}
+
 export interface PopTargets {
   totalPop: number;
   numDistricts: number;
@@ -111,6 +130,11 @@ export interface SolutionStats {
    * have to do, so it is shown on the card before they start.
    */
   steps?: number;
+  /**
+   * With an area (AreaPreference): how many moved blocks lie outside it. 0 = all inside. Absent
+   * when the request had no area.
+   */
+  outsideArea?: number;
   /**
    * True when some transfer reaches further than a compact bite out of the border: a block more
    * than a few hops from the receiving district's territory, or a chain of empty blocks fetching
@@ -210,6 +234,15 @@ export interface DistrictSolveRequest {
   absorbers?: number[];
   /** With no `absorbers`: also trade with adjacent unassigned blocks (see UNASSIGNED). Default false. */
   includeUnassigned?: boolean;
+  /** Where the user would like the moves to happen (see AreaPreference). Absent = anywhere. */
+  area?: AreaPreference;
+  /**
+   * The deviation the district should end at, against DRA's displayed target (targets.draTarget):
+   * -1, 0 or +1, exactly. Absent = "zero" as everywhere else: q or q + 1 (see PopTargets), which
+   * DRA may show as 0 or as one person off when the state does not divide evenly. With a goal,
+   * 'already-zero' means the district already sits at exactly that deviation.
+   */
+  goal?: -1 | 0 | 1;
   /**
    * A neighbor may not end further from draTarget than max(|its current deviation|, neighborTolerance).
    * Default 0: never leave a neighbor worse than it is now.
@@ -284,6 +317,14 @@ export interface GroupSolveRequest {
    * unassigned areas it touches hold enough people.
    */
   includeUnassigned?: boolean;
+  /** Where the user would like the moves to happen (see AreaPreference). Absent = anywhere. */
+  area?: AreaPreference;
+  /**
+   * Exact deviation goals for some members, against targets.draTarget (see
+   * DistrictSolveRequest.goal), keyed by district. Used by the one-district fallback (a group of
+   * one) when the user aims for -1, 0 or +1. Members without an entry use the usual rule.
+   */
+  goals?: Record<number, -1 | 0 | 1>;
   solver: BorderSolver;
   weights?: Partial<CostWeights>;
   /** done / total border realizations, for the progress bar. */

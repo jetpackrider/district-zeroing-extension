@@ -73,9 +73,11 @@ export interface RepairInput {
   tracker: DistrictTracker;
   /** Blocks that may not move (caller's lock plus every block already moved); updated. */
   lock: Uint8Array;
-  /** pop − q for every district index 0..k; updated in place. */
+  /** pop − targetBase for every district index 0..k; updated in place. */
   rho: number[];
   hi: 0 | 1;
+  /** Per-district upper slack (0 = exact goal, 1 = may keep +1). Defaults to `hi`. */
+  memberHi?: ArrayLike<number>;
   /** selected[d] = 1 for districts that must end at q or q + 1. */
   selected: Uint8Array;
   /** absorber[d] = 1 for outside districts allowed to give or take (allowOutsideAbsorb). */
@@ -146,6 +148,7 @@ const roundUp = (x: number, step: number) => Math.ceil(x / step) * step;
 
 export function repairResiduals(input: RepairInput): RepairResult {
   const { graph, hi, selected, absorber, rho, tracker, lock, isCompactTransfer } = input;
+  const hiOf = (d: number) => (input.memberHi ? input.memberHi[d] : hi);
   const committed: Transfer[] = [];
   const longReach = new Set<Transfer>();
   const usesWater = new Set<Transfer>();
@@ -204,11 +207,11 @@ export function repairResiduals(input: RepairInput): RepairResult {
   const localSearch = (f: number): boolean => {
     callsLeft = REPAIR_CALL_BUDGET;
     const root = rho.slice();
-    const v0 = (d: number) => violation(root[d], hi);
+    const v0 = (d: number) => violation(root[d], hiOf(d));
     /** End condition for a district after a combination. */
     const okAt = (d: number, r: number): boolean => {
       if (!selected[d]) return true;
-      const x = violation(r, hi);
+      const x = violation(r, hiOf(d));
       if (d === f) return x === 0;
       if (x === 0) return true;
       const x0 = v0(d);
@@ -281,13 +284,14 @@ export function repairResiduals(input: RepairInput): RepairResult {
       if (bad.length === 0) return path.slice();
       if (left <= 0 || Math.ceil(bad.length / 2) > left || ++nodes > REPAIR_NODE_BUDGET) return null;
       // Loose ends (districts this combination pushed out) first, then f.
-      const others = bad.filter((d) => d !== f).sort((a, b) => Math.abs(violation(cur[b], hi)) - Math.abs(violation(cur[a], hi)) || a - b);
+      const others = bad.filter((d) => d !== f).sort((a, b) => Math.abs(violation(cur[b], hiOf(b))) - Math.abs(violation(cur[a], hiOf(a))) || a - b);
       const g = others.length ? others[0] : f;
-      const vg = violation(cur[g], hi);
+      const hg = hiOf(g);
+      const vg = violation(cur[g], hg);
       const give = vg > 0;
       const need = Math.abs(vg);
       // Amounts (net, into or out of g) that put g in its band.
-      const close = give ? range(cur[g] - hi, cur[g]) : range(-cur[g], hi - cur[g]);
+      const close = give ? range(cur[g] - hg, cur[g]) : range(-cur[g], hg - cur[g]);
       const closeSet = new Set(close);
       type Child = { items: Item[]; badAfter: number; resid: number; outside: number; steps: number; longReach: number; water: number; blocks: number; key: string };
       const children: Child[] = [];
@@ -299,7 +303,7 @@ export function repairResiduals(input: RepairInput): RepairResult {
         move(items, 1);
         const after = badList();
         let resid = 0;
-        for (const d of after) resid += Math.abs(violation(cur[d], hi));
+        for (const d of after) resid += Math.abs(violation(cur[d], hiOf(d)));
         move(items, -1);
         if (Math.ceil(after.length / 2) > left - cost) return;
         let blocks = 0;
@@ -464,7 +468,7 @@ export function repairResiduals(input: RepairInput): RepairResult {
     let worst = 0;
     for (let d = 1; d <= k; d++) {
       if (!selected[d]) continue;
-      const x = Math.abs(violation(rho[d], hi));
+      const x = Math.abs(violation(rho[d], hiOf(d)));
       if (x > worst) { worst = x; f = d; }
     }
     if (f < 0) return { ok: true, transfers: committed, longReach, usesWater, solverCalls };
@@ -473,7 +477,7 @@ export function repairResiduals(input: RepairInput): RepairResult {
         ok: false,
         transfers: committed,
         solverCalls,
-        stuck: { district: f, residual: rho[f], violation: violation(rho[f], hi), neighbors: allowedNeighbors(f), solverCalls },
+        stuck: { district: f, residual: rho[f], violation: violation(rho[f], hiOf(f)), neighbors: allowedNeighbors(f), solverCalls },
       };
     }
   }

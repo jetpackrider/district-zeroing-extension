@@ -8,6 +8,8 @@
  */
 
 import * as dra from '../dra/hooks';
+import { AreaLayers } from './area';
+import { ClusterLayers } from './clusters';
 import { HighlightLayers } from './highlight';
 import { HOOK_VERSION, RELAY_READY_EVENT, unwrap, wrap, type HookPerf, type HookSnapshot, type HookToPanel, type PanelToHook, type SelfCheck } from '../shared/protocol';
 
@@ -63,6 +65,14 @@ export function startHook(): void {
   const send = (msg: HookToPanel) => {
     for (const p of live) p.postMessage(wrap(msg));
   };
+  // The user's area: its outline, and drawing one (clicks never reach DRA while drawing).
+  const area = new AreaLayers(() => (dra.mapForcedMissing() ? null : dra.getMap()), {
+    drawn: (ring) => send({ t: 'area-drawn', ring }),
+    cancelled: () => send({ t: 'area-draw-ended', reason: 'cancelled' }),
+    picked: (reqId, point) => send({ t: 'area-picked', reqId, point }),
+  });
+  // County cluster outlines (hovered in the panel), under the area and the highlights.
+  const clusters = new ClusterLayers(() => (dra.mapForcedMissing() ? null : dra.getMap()));
   /** An exception escaping the poll loop would otherwise vanish; report each distinct one once. */
   let lastThrown = '';
   const report = (where: string, e: unknown) => {
@@ -105,7 +115,7 @@ export function startHook(): void {
     const m = dra.getModel();
     // District pops are part of the signature: DRA recomputes aggregates lazily after an edit.
     const pops = dra.readDistricts(m).map((d) => d.pop).join(',');
-    return `${dra.readSignature(m)}|${pops}|${dra.readPendingShatter(m).join(',')}|${dra.paintSignature(m)}`;
+    return `${dra.readSignature(m)}|${pops}|${dra.readPendingShatter(m).join(',')}|${dra.paintSignature(m)}|${dra.undoSignature(m)}`;
   };
 
   /** Our copy of the feature map as last sent, and that snapshot's seq (deltas are against it). */
@@ -144,6 +154,7 @@ export function startHook(): void {
       }
       featureSig = stamps;
       sentSeq = mySeq;
+      const undo = dra.readUndoPos(m);
       const snap: HookSnapshot = {
         seq: mySeq,
         sig,
@@ -153,6 +164,7 @@ export function startHook(): void {
         blockMappingStamp: dra.readBlockMappingStamp(m),
         pendingShatter: dra.readPendingShatter(m),
         paint: dra.paintAvailability(m),
+        ...(undo ? { undoPos: undo.cur, ...(undo.topId !== undefined ? { undoTopId: undo.topId } : {}) } : {}),
       };
       perf.readMs = performance.now() - t0;
       send({ t: 'snapshot', snap: { ...snap, hookPerf: { ...perf } } });
@@ -209,6 +221,8 @@ export function startHook(): void {
     }
     sendSnapshot();
     highlight.ensure();
+    area.ensure();
+    clusters.ensure();
   };
 
   const flushSoon = () => {
@@ -269,7 +283,29 @@ export function startHook(): void {
         highlight.fit(msg.bbox);
         break;
       case 'probe-highlight':
-        send({ t: 'highlight-status', status: highlight.status(), reqId: msg.reqId });
+        send({ t: 'highlight-status', status: { ...highlight.status(), area: area.status(), clusters: clusters.status() }, reqId: msg.reqId });
+        break;
+      case 'area-show':
+        area.setRing(msg.ring);
+        break;
+      case 'area-draw-start': {
+        const why = area.startDrawing();
+        if (why) send({ t: 'area-draw-ended', reason: 'unavailable', detail: why });
+        break;
+      }
+      case 'area-pick-start': {
+        const detail = area.startDrawing(msg);
+        if (detail) send({ t: 'area-picked', reqId: msg.reqId, point: null, detail });
+        break;
+      }
+      case 'area-draw-cancel':
+        area.stopDrawing();
+        break;
+      case 'request-view':
+        send({ t: 'view', reqId: msg.reqId, ring: area.viewRing() });
+        break;
+      case 'clusters-show':
+        clusters.setData(msg.fc);
         break;
       case 'paint-step': {
         const { reqId, step } = msg;
@@ -280,9 +316,28 @@ export function startHook(): void {
         painting = true;
         dra
           .paintStep(step)
-          .then((result) => send({ t: 'paint-result', reqId, result }))
+          .then((result) => send({ t: 'paint-result', reqId, result: result.status === 'painted' ? { ...result, snapSeq: seq } : result }))
           .catch((e) =>
             send({ t: 'paint-result', reqId, result: { status: 'mismatch', stepId: step.stepId, summary: 'The paint failed in an unexpected way, so the extension cannot tell what changed.', details: [String(e), "Check the precinct in DRA. If it changed, DRA's Undo takes the edit back."], changedSomething: true, undoRecorded: false } }),
+          )
+          .finally(() => {
+            painting = false;
+            if (lastCheck?.ok) sendSnapshot();
+          });
+        break;
+      }
+      case 'undo-paint': {
+        const { reqId, req } = msg;
+        if (painting) {
+          send({ t: 'undo-result', reqId, result: { status: 'refused', stepId: req.stepId, reason: 'Another paint or undo is still in flight.' } });
+          break;
+        }
+        painting = true;
+        dra
+          .undoPaint(req)
+          .then((result) => send({ t: 'undo-result', reqId, result: result.status === 'refused' ? result : { ...result, snapSeq: seq } }))
+          .catch((e) =>
+            send({ t: 'undo-result', reqId, result: { status: 'mismatch', stepId: req.stepId, summary: 'Undoing failed in an unexpected way, so the extension cannot tell what changed.', details: [String(e)], changedSomething: true, snapSeq: seq } }),
           )
           .finally(() => {
             painting = false;

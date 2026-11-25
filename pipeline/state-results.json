@@ -479,7 +479,7 @@
   },
   "AL": {
     "result": "passed",
-    "buildExitCode": 0,
+    "buildExitCode": null,
     "validationExitCode": 0,
     "precinctKind": "vtd",
     "counts": {
@@ -500,7 +500,9 @@
       "adjustedBlocks": 0,
       "cornerOnlyPairs": 147945,
       "unhashedRookTouches": 0,
-      "unhashedRookExamples": []
+      "unhashedRookExamples": [],
+      "towns": 462,
+      "townBlocks": 95630
     },
     "cd119Districts": 7,
     "bundle": {
@@ -509,21 +511,21 @@
       "countyFeatures": 185976
     },
     "buildSeconds": 40.747,
-    "validateSeconds": 19.415,
+    "validateSeconds": 28.531,
     "buildPeakPythonRSSBytes": 967081984,
     "buildPeakChildRSSBytes": 280297472,
-    "validationPeakPythonRSSBytes": 1282949120,
+    "validationPeakPythonRSSBytes": 1157218304,
     "differences": {},
     "error": null,
     "files": {
-      "manifest": "c2b8382addc948414599da4083bb9c0cfaebe66b6151ea332b1acf943d9496a9",
+      "manifest": "73d3eb4213392ed5c68576069a20c3614d1c0983d1f338ab5d270c40e7326ab7",
       "fixture": "55eff93b947b917bf2500ec9e5f8b00960a4a928804e52993ce8769cc94dd404"
     },
     "audit": "data/AL/validation.json"
   },
   "AK": {
     "result": "passed",
-    "buildExitCode": 0,
+    "buildExitCode": null,
     "validationExitCode": 0,
     "precinctKind": "vtd",
     "counts": {
@@ -544,7 +546,9 @@
       "adjustedBlocks": 0,
       "cornerOnlyPairs": 15332,
       "unhashedRookTouches": 0,
-      "unhashedRookExamples": []
+      "unhashedRookExamples": [],
+      "towns": 149,
+      "townBlocks": 10613
     },
     "cd119Districts": 1,
     "bundle": {
@@ -553,21 +557,21 @@
       "countyFeatures": 28568
     },
     "buildSeconds": 15.769,
-    "validateSeconds": 6.402,
+    "validateSeconds": 12.795,
     "buildPeakPythonRSSBytes": 998817792,
     "buildPeakChildRSSBytes": 263716864,
-    "validationPeakPythonRSSBytes": 1080393728,
+    "validationPeakPythonRSSBytes": 790298624,
     "differences": {},
     "error": null,
     "files": {
-      "manifest": "c2236fd8c1e00b7667981dcaedd708e1a14489f69a14e7464131f312719910e4",
+      "manifest": "261545bef2ef55bcb2b0cf132d18e33514ac80bb06df2f576862bab127367104",
       "fixture": null
     },
     "audit": "data/AK/validation.json"
   },
   "AZ": {
     "result": "passed",
-    "buildExitCode": 0,
+    "buildExitCode": null,
     "validationExitCode": 0,
     "precinctKind": "vtd",
     "counts": {
@@ -588,7 +592,9 @@
       "adjustedBlocks": 0,
       "cornerOnlyPairs": 102146,
       "unhashedRookTouches": 0,
-      "unhashedRookExamples": []
+      "unhashedRookExamples": [],
+      "towns": 91,
+      "townBlocks": 84546
     },
     "cd119Districts": 9,
     "bundle": {
@@ -597,21 +603,21 @@
       "countyFeatures": 155444
     },
     "buildSeconds": 28.048,
-    "validateSeconds": 14.199,
+    "validateSeconds": 24.472,
     "buildPeakPythonRSSBytes": 1254309888,
     "buildPeakChildRSSBytes": 464748544,
-    "validationPeakPythonRSSBytes": 1145634816,
+    "validationPeakPythonRSSBytes": 1052753920,
     "differences": {},
     "error": null,
     "files": {
-      "manifest": "fa293564c7b73020fa5f5ba0b2cbf832aa10c4f57267e6f2d19880c0fb12603a",
+      "manifest": "004fe179e8dbfb8a2606469efb5bd6b5ac7eaea352d1bf8362c12727e2a8f217",
       "fixture": "9873ea28344b7b7e672311d792302d3801af30d04939abde12ee2cfd68663b07"
     },
     "audit": "data/AZ/validation.json"
   },
   "AR": {
     "result": "passed",
-    "buildExitCode": 0,
+    "buildExitCode": null,
     "validationExitCode": 0,
     "precinctKind": "vtd",
     "counts": {
@@ -632,7 +638,9 @@
       "adjustedBlocks": 0,
       "cornerOnlyPairs": 118463,
       "unhashedRookTouches": 0,
-      "unhashedRookExamples": []
+      "unhashedRookExamples": [],
+      "towns": 501,
+      "townBlocks": 62179
     },
     "cd119Districts": 4,
     "bundle": {
@@ -641,14 +649,14 @@
       "countyFeatures": 136422
     },
     "buildSeconds": 30.41,
-    "validateSeconds": 14.621,
+    "validateSeconds": 15.295,
     "buildPeakPythonRSSBytes": 1324974080,
     "buildPeakChildRSSBytes": 208076800,
-    "validationPeakPythonRSSBytes": 1051623424,
+    "validationPeakPythonRSSBytes": 1224622080,
     "differences": {},
     "error": null,
     "files": {
-      "manifest": "c56bd1086818d2de86d5d05d059c9958bbeec169c4f55cf4cfa61863769dba6c",
+      "manifest": "f110f58167611559e6d3b5524ac071dbb7d5e762afa923c0ea82153d7446a1ed",
       "fixture": "c3c573d9b48fbd232502ef1841029ae38b85a520ba2246217e438e9015b81f21"
     },
     "audit": "data/AR/validation.json"

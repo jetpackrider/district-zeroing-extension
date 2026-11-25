@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { IDBFactory } from 'fake-indexeddb';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { StateBundle } from '@zd/contracts';
-import { BrowserBundleSource, geoidIndex, toEngineGraph } from '../src/index';
+import { BrowserBundleSource, decodeManifest, decodePoints, geoidIndex, toEngineGraph } from '../src/index';
 import { NodeBundleSource } from '../src/node';
 
 const root = fileURLToPath(new URL('../../../data/', import.meta.url));
@@ -94,6 +94,50 @@ describe('New York bundle written by the Python pipeline', () => {
     expect(() => toEngineGraph(ny, 'D20F', new Uint32Array(1))).toThrow(/every block/);
   });
 
+  it('decodes the Census internal point of every block, in microdegrees', async () => {
+    const points = ny.points!;
+    expect(points).toBeInstanceOf(Int32Array);
+    expect(points).toHaveLength(2 * blocks);
+    // TIGER INTPTLON20 / INTPTLAT20 for 360010001001000 are -073.7265036, +42.6692483.
+    expect([points[0], points[1]]).toEqual([-73726504, 42669248]);
+    // Liberty Island: -074.0452499, +40.6898513.
+    const liberty = geoidIndex(ny, '360610001001001');
+    expect([points[2 * liberty], points[2 * liberty + 1]]).toEqual([-74045250, 40689851]);
+    // Every point is in New York's rough box (longitude -79.8..-71.8, latitude 40.4..45.1).
+    for (let i = 0; i < blocks; i++) {
+      const [lon, lat] = [points[2 * i] / 1e6, points[2 * i + 1] / 1e6];
+      if (lon < -79.8 || lon > -71.8 || lat < 40.4 || lat > 45.1) throw new Error(`Point ${i} outside NY`);
+    }
+    // The point lies inside the block's own polygon in the county file (a ray-casting test on its rings).
+    const albany = await node.loadCounty(ny, '36001');
+    const first = albany.features.find((feature) => feature.id === ny.geoids[0])!;
+    const rings = first.geometry.coordinates as number[][][];
+    const [x, y] = [points[0] / 1e6, points[1] / 1e6];
+    let inside = false;
+    for (const ring of rings) {
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const [xi, yi] = ring[i];
+        const [xj, yj] = ring[j];
+        if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+      }
+    }
+    expect(inside).toBe(true);
+  });
+
+  it('rejects a points file of the wrong length or with coordinates out of range', () => {
+    expect(decodePoints(new Int32Array([-180e6, -90e6, 180e6, 90e6]).buffer, 2)).toHaveLength(4);
+    expect(() => decodePoints(new ArrayBuffer(12), 2)).toThrow(/length/);
+    expect(() => decodePoints(new ArrayBuffer(16), 1)).toThrow(/length/);
+    expect(() => decodePoints(new Int32Array([0, 0, 180e6 + 1, 0]).buffer, 2)).toThrow(/block 1/);
+    expect(() => decodePoints(new Int32Array([0, -90e6 - 1]).buffer, 1)).toThrow(/block 0/);
+    // A manifest may omit points, but a points entry must name its own hash.
+    expect(decodeManifest({ ...ny.manifest, points: undefined }, 'NY').points).toBeUndefined();
+    const ref = ny.manifest.points!;
+    expect(() => decodeManifest({ ...ny.manifest, points: { ...ref, file: `water.${ref.sha256}.bin.gz` } }, 'NY'))
+      .toThrow(/manifest/);
+    expect(() => decodeManifest({ ...ny.manifest, points: { ...ref, bytes: 0 } }, 'NY')).toThrow(/manifest/);
+  });
+
   it('decodes real county TopoJSON to the same block set in WGS84', async () => {
     const albany = await node.loadCounty(ny, '36001');
     expect(albany.type).toBe('FeatureCollection');
@@ -132,10 +176,13 @@ describe('New York bundle written by the Python pipeline', () => {
     expect((await browser.loadCounty(loaded, county.fips)).features).toHaveLength(county.features);
     expect(fetchMock.mock.calls.map(([url]) => url.pathname)).toEqual([
       '/assets/NY/manifest.json', `/assets/NY/${attrs.file}`, `/assets/NY/${ny.manifest.water!.file}`,
-      `/assets/NY/${ny.manifest.towns!.file}`, `/assets/NY/${county.file}`,
+      `/assets/NY/${ny.manifest.towns!.file}`, `/assets/NY/${ny.manifest.names!.file}`,
+      `/assets/NY/${ny.manifest.points!.file}`, `/assets/NY/${county.file}`,
     ]);
     // The water sidecar: one flag per block, and every water-only block is unpopulated or nearly so.
     expect(loaded.townOf).toEqual(ny.townOf);
+    expect(loaded.names).toEqual(ny.names);
+    expect(loaded.points).toEqual(ny.points);
     expect(loaded.waterOnly).toHaveLength(loaded.n);
     expect(loaded.waterOnly!.reduce((sum, flag) => sum + flag, 0)).toBe(7660);
     expect(toEngineGraph(loaded, 'D20F').water).toBe(loaded.waterOnly);
@@ -148,10 +195,65 @@ describe('New York bundle written by the Python pipeline', () => {
 
     fetchMock.mockImplementation(async (url) => {
       expect(url.pathname).toBe('/assets/NY/manifest.json');
-      return Response.json({ ...ny.manifest, water: undefined, towns: undefined });
+      return Response.json({ ...ny.manifest, water: undefined, towns: undefined, points: undefined, names: undefined });
     });
     const legacy = await new BrowserBundleSource(base).loadState('NY');
+    expect(legacy).not.toHaveProperty('points');
     expect(legacy).not.toHaveProperty('townOf');
+    expect(legacy).not.toHaveProperty('names');
     expect(legacy).not.toHaveProperty('waterOnly');
+  }, 15000);
+
+  it('points on demand: loadState does not fetch the points sidecar; loadPoints fetches it once', async () => {
+    const points = ny.manifest.points!;
+    const fetchMock = vi.fn(async (url: URL) => {
+      const file = url.pathname.replace(/^\/assets\/NY\//, '');
+      return new Response(Uint8Array.from(await readFile(join(root, 'NY', file))));
+    });
+    vi.stubGlobal('indexedDB', new IDBFactory());
+    vi.stubGlobal('fetch', fetchMock);
+    const browser = new BrowserBundleSource(base, { points: 'on-demand' });
+    const loaded = await browser.loadState('NY');
+    const fetched = () => fetchMock.mock.calls.map(([url]) => url.pathname);
+    expect(fetched()).not.toContain(`/assets/NY/${points.file}`);
+    expect(loaded.points).toBeUndefined();
+    const [a, b] = await Promise.all([browser.loadPoints(loaded), browser.loadPoints(loaded)]);
+    expect(a).toBe(b);
+    expect(loaded.points).toBe(a);
+    expect(a).toEqual(ny.points);
+    expect(fetched().filter((p) => p === `/assets/NY/${points.file}`)).toHaveLength(1);
+    expect(await browser.loadPoints(loaded)).toBe(a);
+  }, 15000);
+
+  it('a bad points file does not fail the state: it loads without points, and loadPoints says why', async () => {
+    const points = ny.manifest.points!;
+    const bad = Uint8Array.from(await readFile(join(root, 'NY', points.file)));
+    bad[bad.length - 1] ^= 1;
+    let corrupt = true;
+    vi.stubGlobal('indexedDB', new IDBFactory());
+    vi.stubGlobal('fetch', vi.fn(async (url: URL) => {
+      const file = url.pathname.replace(/^\/assets\/NY\//, '');
+      if (file === points.file && corrupt) return new Response(bad);
+      return new Response(Uint8Array.from(await readFile(join(root, 'NY', file))));
+    }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const browser = new BrowserBundleSource(base);
+    const loaded = await browser.loadState('NY');
+    expect(loaded.geoids).toEqual(ny.geoids);
+    expect(loaded.points).toBeUndefined();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+    await expect(browser.loadPoints(loaded)).rejects.toThrow(/hash or size mismatch/);
+    // A failed read is not kept: once the file is right, it loads.
+    corrupt = false;
+    expect(await browser.loadPoints(loaded)).toEqual(ny.points);
+  }, 15000);
+
+  it('node reader: points on demand too', async () => {
+    const lazy = new NodeBundleSource(root, { points: 'on-demand' });
+    const loaded = await lazy.loadState('NY');
+    expect(loaded.points).toBeUndefined();
+    expect(await lazy.loadPoints(loaded)).toEqual(ny.points);
+    expect(loaded.points).toEqual(ny.points);
   }, 15000);
 });

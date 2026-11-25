@@ -1,16 +1,16 @@
 import { useMemo } from 'react';
 import type { PanelAction, PanelState } from '@zd/contracts';
 import {
-  UNASSIGNED_COLOR,
   UNASSIGNED_NAME,
   chosenNeighbors,
+  deltaToGoal,
   formatDistrictName,
   formatInt,
   formatNeighborNames,
   formatPeople,
   formatSigned,
   getDeviationTone,
-  isDeviationZeroed,
+  isAtGoal,
   isUnassigned,
   joinNames,
   neighborChoiceRows,
@@ -36,8 +36,9 @@ interface NeighborChooserProps {
 export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
   const { scope, districts, map } = state;
   const row = scope.mode === 'one' ? districts.find((d) => d.index === scope.district) : undefined;
+  const goal = scope.mode === 'one' ? scope.goal : undefined;
   const locked = state.lockedDistricts;
-  const allOptions = useMemo(() => (row ? neighborChoiceRows(row, districts, map) : []), [row, districts, map]);
+  const allOptions = useMemo(() => (row ? neighborChoiceRows(row, districts, map, goal) : []), [row, districts, map, goal]);
   // A locked neighbor never trades, so it is not on offer.
   const options = useMemo(() => allOptions.filter((o) => !locked?.includes(o.index)), [allOptions, locked]);
   const lockedNeighbors = allOptions.filter((o) => locked?.includes(o.index));
@@ -47,15 +48,16 @@ export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
     () => pickedAll.filter((d) => isUnassigned(d) || !locked?.includes(d)),
     [pickedAll, locked],
   );
-  const unassigned = row ? unassignedChoice(row, state) : undefined;
+  const unassigned = row ? unassignedChoice(row, state, goal) : undefined;
 
   if (scope.mode !== 'one' || !row || !row.neighbors || row.neighbors.length === 0) return null;
-  if (isDeviationZeroed(row.deviation, map)) return null;
+  if (isAtGoal(row.deviation, goal, map)) return null;
   if (locked?.includes(row.index)) return null;
 
   const pickedSet = new Set(picked);
-  const over = row.deviation > 0;
-  const direction = tradeDirectionPhrase(row, districts);
+  const delta = deltaToGoal(row.deviation, goal);
+  const over = delta > 0;
+  const direction = tradeDirectionPhrase(row, districts, goal);
   const pickedNames = formatNeighborNames(picked, districts);
   const name = formatDistrictName(row.index, districts);
   const giveOrTake = over ? 'give them to' : 'take them from';
@@ -86,14 +88,17 @@ export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
       : !over
         ? `No people are unassigned, so "Any neighbor" leaves ${UNASSIGNED_NAME} out; it has nobody to give.`
         : unassignedPicked
-          ? `This leaves ${formatPeople(row.deviation)} unassigned on a map that had none.`
-          : `No people are unassigned, so "Any neighbor" leaves ${UNASSIGNED_NAME} out. Picking it leaves ${formatPeople(row.deviation)} unassigned.`;
+          ? `This leaves ${formatPeople(delta)} unassigned on a map that had none.`
+          : `No people are unassigned, so "Any neighbor" leaves ${UNASSIGNED_NAME} out. Picking it leaves ${formatPeople(delta)} unassigned.`;
 
   const setWith = (next: number[]) => {
     const sorted = [...new Set(next)].sort((a, b) => a - b);
+    const withGoal = goal !== undefined ? { goal } : {};
     dispatch({
       type: 'set-scope',
-      scope: sorted.length ? { mode: 'one', district: row.index, with: sorted } : { mode: 'one', district: row.index },
+      scope: sorted.length
+        ? { mode: 'one', district: row.index, with: sorted, ...withGoal }
+        : { mode: 'one', district: row.index, ...withGoal },
     });
   };
 
@@ -109,7 +114,7 @@ export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
     return (
       <label
         key={o.index}
-        className={`zd-chooser__row${checked ? ' zd-chooser__row--picked' : ''}`}
+        className={`zd-list__row zd-chooser__row${checked ? ' zd-list__row--selected' : ''}`}
         data-testid={`chooser-row-${o.index}`}
       >
         <input
@@ -123,9 +128,9 @@ export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
           <span>{nbrName}</span>
         </span>
         <span className="zd-chooser__vals zd-num">
-          <span style={{ color: 'var(--zd-text-muted)' }}>{formatSigned(o.before)}</span>
+          <span className="zd-muted">{formatSigned(o.before)}</span>
           <span aria-hidden="true">→</span>
-          <span className={`zd-dev zd-dev--inline zd-dev--${afterTone}`}>
+          <span className={`zd-pill zd-num zd-pill--inline zd-pill--${afterTone}`}>
             {formatSigned(o.after)}
             {o.zeroes ? ' ✓' : ''}
           </span>
@@ -155,7 +160,7 @@ export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
         {summary}
       </p>
 
-      <div className="zd-chooser__list" role="group" aria-label={`${direction}…`}>
+      <div className="zd-list" role="group" aria-label={`${direction}…`}>
         <div className="zd-chooser__colhead" aria-hidden="true">
           <span>Neighbor</span>
           <span>now → if it {over ? 'takes' : 'gives'} them all</span>
@@ -163,7 +168,7 @@ export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
         {options.slice(0, unassignedPos).map((o) => renderRow(o))}
         {unassigned && (
           <label
-            className={`zd-chooser__row zd-chooser__row--unassigned${unassignedPicked ? ' zd-chooser__row--picked' : ''}`}
+            className={`zd-list__row zd-chooser__row zd-chooser__row--unassigned${unassignedPicked ? ' zd-list__row--selected' : ''}`}
             data-testid="chooser-row-0"
           >
             <input
@@ -173,12 +178,12 @@ export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
               aria-label={`${over ? 'Give to' : 'Take from'} ${UNASSIGNED_NAME}`}
             />
             <span className="zd-chooser__name">
-              <span className="zd-swatch" style={{ backgroundColor: UNASSIGNED_COLOR }} aria-hidden="true" />
+              <span className="zd-swatch zd-swatch--unassigned" aria-hidden="true" />
               <span>{UNASSIGNED_NAME}</span>
             </span>
             <span className="zd-chooser__vals zd-num">
               <span className="zd-chooser__pop-label">pop</span>
-              <span style={{ color: 'var(--zd-text-muted)' }}>{formatInt(unassigned.before)}</span>
+              <span className="zd-muted">{formatInt(unassigned.before)}</span>
               <span aria-hidden="true">→</span>
               <span>{formatInt(unassigned.after)}</span>
               {unassigned.short && <span className="zd-chooser__pop-label">holds too few</span>}
@@ -189,7 +194,7 @@ export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
       </div>
 
       {lockedNeighbors.length > 0 && (
-        <p className="zd-chooser__note" data-testid="chooser-locked-note">
+        <p className="zd-note zd-note--warn" data-testid="chooser-locked-note">
           {joinNames(lockedNeighbors.map((o) => formatDistrictName(o.index, districts)))}{' '}
           {lockedNeighbors.length === 1 ? 'is locked and is' : 'are locked and are'} left out.
         </p>
@@ -197,7 +202,7 @@ export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
 
       {unassignedNote && (
         <p
-          className={`zd-chooser__note${unassigned?.inDefault ? ' zd-chooser__note--info' : ''}`}
+          className={`zd-note ${unassigned?.inDefault ? 'zd-note--info' : 'zd-note--warn'}`}
           data-testid="chooser-unassigned-note"
         >
           {unassignedNote}
@@ -205,7 +210,7 @@ export function NeighborChooser({ state, dispatch }: NeighborChooserProps) {
       )}
 
       {worsePicked.length > 0 && (
-        <p className="zd-chooser__note" data-testid="chooser-worse-note">
+        <p className="zd-note zd-note--warn" data-testid="chooser-worse-note">
           {joinNames(worsePicked.map((o) => formatDistrictName(o.index, districts)))}{' '}
           {worsePicked.length === 1 ? 'may' : 'may each'} end further from zero than now. Allowed, because you picked{' '}
           {worsePicked.length === 1 ? 'it' : 'them'}.

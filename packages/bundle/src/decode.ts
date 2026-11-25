@@ -44,6 +44,9 @@ export function decodeManifest(value: unknown, state: string): BundleManifest {
       || !validFile(manifest.attrs, (hash) => `attrs.${hash}.bin.gz`)
       || (manifest.water !== undefined && !validFile(manifest.water, (hash) => `water.${hash}.bin.gz`))
       || (manifest.towns !== undefined && !validTowns(manifest.towns))
+      || (manifest.points !== undefined && !validFile(manifest.points, (hash) => `points.${hash}.bin.gz`))
+      || (manifest.names !== undefined && !validFile(manifest.names, (hash) => `names.${hash}.json.gz`))
+      || (manifest.outlines !== undefined && !validFile(manifest.outlines, (hash) => `outlines.${hash}.json.gz`))
       || !Array.isArray(manifest.counties) || !manifest.counties.length) {
     throw new Error(`Invalid ${state} bundle manifest`);
   }
@@ -88,6 +91,85 @@ export function decodeTowns(data: ArrayBuffer, n: number, count: number): Uint32
   }
   if (distinct !== count) throw new Error('Town count differs from manifest');
   return towns;
+}
+
+/** The UTF-8 names sidecar, in county and town index order (including town index zero). */
+export function decodeNames(data: ArrayBuffer, countyCount: number, townCount: number): NonNullable<StateBundle['names']> {
+  const { counties, towns } = object(JSON.parse(utf8.decode(data)));
+  const named = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+  if (!Array.isArray(counties) || counties.length !== countyCount || !counties.every(named)
+      || !Array.isArray(towns) || towns.length !== townCount + 1 || towns[0] !== '' || !towns.slice(1).every(named)) {
+    throw new Error('Invalid county or town names');
+  }
+  return { counties, towns };
+}
+
+/** One county's outline in the outlines sidecar (BundleManifest.outlines): `id` is the county index. */
+export interface CountyOutline {
+  type: 'Feature';
+  id: number;
+  properties: { fips: string };
+  geometry:
+    | { type: 'Polygon'; coordinates: number[][][] }
+    | { type: 'MultiPolygon'; coordinates: number[][][][] };
+}
+
+/** The outlines sidecar: a GeoJSON FeatureCollection in WGS84 with features[i] = county index i. */
+export interface CountyOutlines {
+  type: 'FeatureCollection';
+  features: CountyOutline[];
+}
+
+function polygon(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0 && value.every((ring) => Array.isArray(ring) && ring.length >= 4
+    && ring.every((point) => Array.isArray(point) && point.length === 2
+      && typeof point[0] === 'number' && point[0] >= -180 && point[0] <= 180
+      && typeof point[1] === 'number' && point[1] >= -90 && point[1] <= 90));
+}
+
+/**
+ * The outlines sidecar, checked against the bundle's counties: one feature per county in county
+ * index order (id = index, properties.fips = countyFips[index]), each a Polygon or MultiPolygon of
+ * closed rings of [longitude, latitude].
+ */
+export function decodeOutlines(data: ArrayBuffer, countyFips: readonly string[]): CountyOutlines {
+  const parsed = object(JSON.parse(utf8.decode(data)));
+  const features = parsed.features;
+  if (parsed.type !== 'FeatureCollection' || !Array.isArray(features) || features.length !== countyFips.length) {
+    throw new Error('Invalid county outlines');
+  }
+  features.forEach((value, index) => {
+    const item = object(value);
+    const properties = object(item.properties);
+    const geometry = object(item.geometry);
+    const coordinates = geometry.coordinates;
+    const valid = geometry.type === 'Polygon' ? polygon(coordinates)
+      : geometry.type === 'MultiPolygon' && Array.isArray(coordinates) && coordinates.length > 0 && coordinates.every(polygon);
+    if (item.type !== 'Feature' || item.id !== index || properties.fips !== countyFips[index] || !valid) {
+      throw new Error(`Invalid outline for county ${countyFips[index]}`);
+    }
+  });
+  return parsed as unknown as CountyOutlines;
+}
+
+/** Microdegrees per degree in the points sidecar. */
+const MICRO = 1_000_000;
+
+/**
+ * The points sidecar: 2·n little-endian Int32, longitude then latitude of a point inside each block,
+ * in millionths of a degree. Every value must be a real longitude (±180°) or latitude (±90°).
+ */
+export function decodePoints(data: ArrayBuffer, n: number): Int32Array {
+  if (data.byteLength !== 8 * n) throw new Error('Invalid points file length');
+  // Supported browser and Node platforms are little-endian.
+  const points = new Int32Array(data);
+  for (let i = 0; i < points.length; i += 2) {
+    if (points[i] < -180 * MICRO || points[i] > 180 * MICRO
+        || points[i + 1] < -90 * MICRO || points[i + 1] > 90 * MICRO) {
+      throw new Error(`Invalid point for block ${i / 2}`);
+    }
+  }
+  return points;
 }
 
 export function decodeAttrs(data: ArrayBuffer, manifest: BundleManifest): StateBundle {

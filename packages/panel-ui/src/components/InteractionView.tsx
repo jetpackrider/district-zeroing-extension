@@ -73,8 +73,7 @@ export function InteractionView({
         </h3>
         {activePlanTitle && (
           <span
-            className="zd-num"
-            style={{ fontSize: 11, color: 'var(--zd-accent)', fontWeight: 600, whiteSpace: 'nowrap', flex: 'none' }}
+            className="zd-num zd-interaction__plan"
           >
             Arrows: {activePlanTitle}
           </span>
@@ -137,7 +136,7 @@ export function InteractionView({
                 tabIndex={0}
                 role="button"
                 aria-label={`Shared border between ${formatDistrictName(edge.a, districts)} and ${formatDistrictName(edge.b, districts)}: cheap capacity ${formatInt(edge.cheapAtoB)} and ${formatInt(edge.cheapBtoA)}`}
-                style={{ cursor: 'pointer', outline: 'none' }}
+                className="zd-interaction__edge"
                 onMouseEnter={() => {
                   setHoveredKey(key);
                   dispatch({ type: 'hover-border', a: edge.a, b: edge.b });
@@ -192,10 +191,10 @@ export function InteractionView({
                       x={mx}
                       y={my + 3.5}
                       textAnchor="middle"
-                      fontSize={9.5}
-                      fontWeight={600}
+                      fontSize="var(--zd-text-xs)"
+                      fontWeight="var(--zd-weight-medium)"
                       fill={isHovered ? 'var(--zd-accent)' : 'var(--zd-text-secondary)'}
-                      style={{ fontVariantNumeric: 'tabular-nums' }}
+                      className="zd-num"
                     >
                       {cheapLabel}
                     </text>
@@ -292,10 +291,10 @@ export function InteractionView({
                     y={my}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fontSize={showFullPill ? 9 : 9.5}
-                    fontWeight={700}
+                    fontSize="var(--zd-text-xs)"
+                    fontWeight="var(--zd-weight-bold)"
                     fill="var(--zd-twoway-text)"
-                    style={{ fontVariantNumeric: 'tabular-nums' }}
+                    className="zd-num"
                   >
                     {pillLabel}
                   </text>
@@ -354,10 +353,10 @@ export function InteractionView({
                       x={mx}
                       y={my + 3.5}
                       textAnchor="middle"
-                      fontSize={9.5}
-                      fontWeight={700}
+                      fontSize="var(--zd-text-xs)"
+                      fontWeight="var(--zd-weight-bold)"
                       fill="var(--zd-accent-text)"
-                      style={{ fontVariantNumeric: 'tabular-nums' }}
+                      className="zd-num"
                     >
                       {label}
                     </text>
@@ -413,10 +412,10 @@ export function InteractionView({
                   x={node.x}
                   y={dense ? node.y + 3.5 : node.y - 2}
                   textAnchor="middle"
-                  fontSize={dense ? 10 : 11.5}
-                  fontWeight={700}
+                  fontSize="var(--zd-text-xs)"
+                  fontWeight="var(--zd-weight-bold)"
                   fill="var(--zd-text)"
-                  style={{ fontVariantNumeric: 'tabular-nums' }}
+                  className="zd-num"
                 >
                   {shortLabel.length > 4 ? shortLabel.slice(0, 4) : shortLabel}
                 </text>
@@ -425,10 +424,10 @@ export function InteractionView({
                     x={node.x}
                     y={node.y + 10.5}
                     textAnchor="middle"
-                    fontSize={9}
-                    fontWeight={650}
+                    fontSize="var(--zd-text-xs)"
+                    fontWeight="var(--zd-weight-bold)"
                     fill={stroke}
-                    style={{ fontVariantNumeric: 'tabular-nums' }}
+                    className="zd-num"
                   >
                     {formatSigned(node.deviation)}
                   </text>
@@ -444,7 +443,7 @@ export function InteractionView({
           <>
             {hoveredTrade?.kind === 'two-way' ? (
               <span>
-                <strong style={{ color: 'var(--zd-twoway)' }}>
+                <strong className="zd-interaction__trade">
                   {formatDistrictShort(hoveredTrade.first.from, districts)} ⇄{' '}
                   {formatDistrictShort(hoveredTrade.first.to, districts)} (2-way):
                 </strong>{' '}
@@ -479,12 +478,12 @@ export function InteractionView({
                 {formatDistrictShort(hoveredEdge.a, districts)} {formatInt(hoveredEdge.cheapBtoA)}
               </span>
             )}
-            <span style={{ color: 'var(--zd-text-muted)' }}>
+            <span className="zd-muted">
               max {formatInt(hoveredEdge.maxAtoB)} / {formatInt(hoveredEdge.maxBtoA)}
             </span>
           </>
         ) : (
-          <span style={{ color: 'var(--zd-text-muted)' }}>
+          <span className="zd-muted">
             {mapMode === 'mini'
               ? hasTwoWayTrades
                 ? 'Hover a border to preview it on the mini-map and see two-way trade legs.'

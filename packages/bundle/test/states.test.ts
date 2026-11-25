@@ -39,6 +39,14 @@ describe('real Phase 8 bundles', () => {
       // Release each state cache before loading the next.
       const bundle = await new NodeBundleSource(root).loadState(state);
       expect(bundle.townOf).toHaveLength(bundle.n);
+      expect(bundle.points).toHaveLength(2 * bundle.n);
+      expect(bundle.names?.counties).toHaveLength(bundle.countyFips.length);
+      expect(bundle.names?.towns).toHaveLength(bundle.manifest.towns!.count + 1);
+      expect(bundle.names?.towns[0]).toBe('');
+      if (state === 'NY') {
+        expect(bundle.names?.counties[bundle.countyFips.indexOf('36103')]).toBe('Suffolk County');
+        expect(bundle.names?.towns).toContain('Huntington town');
+      }
       expect(bundle.manifest.towns!.count > 0).toBe(state !== 'HI');
       if (state === 'AL') expect(bundle.precinctIds).toContain('010130014.1');
       if (state === 'AR') expect(bundle.precinctIds).toContain('05081000W/R');

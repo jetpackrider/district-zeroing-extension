@@ -1217,3 +1217,484 @@ describe('Panel — Unassigned (a map still being drawn)', () => {
     });
   });
 });
+
+describe('Panel — an area of the map for the swap', () => {
+  it('searches counties, keeps the mode when picking a town, and cancels with Esc or Cancel', async () => {
+    const user = userEvent.setup();
+    const controller = new MockController({ initialScenario: 'live-area-prefer' });
+    render(<Panel controller={controller} />);
+
+    await user.click(screen.getByRole('button', { name: 'County' }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search counties' }), 'suff');
+    expect(screen.queryByRole('option', { name: 'New York County' })).toBeNull();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'County' }), 'Suffolk County');
+    expect(screen.getByTestId('area-region-name')).toHaveTextContent('Suffolk County');
+    expect(controller.getState().area?.ring).toBeUndefined();
+    await user.click(screen.getByTestId('area-mode-only'));
+
+    await user.click(screen.getByRole('button', { name: 'Town' }));
+    await user.click(screen.getByRole('button', { name: 'Pick on map' }));
+    expect(screen.getByTestId('area-pick-hint')).toHaveTextContent('pick a town');
+    await user.keyboard('{Escape}');
+    expect(screen.getByTestId('area-region-name')).toHaveTextContent('Suffolk County');
+
+    await user.click(screen.getByRole('button', { name: 'Pick on map' }));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByTestId('area-pick-hint')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Pick on map' }));
+    act(() => controller.finishAreaPick(339));
+    expect(screen.getByTestId('area-region-name')).toHaveTextContent('Huntington town');
+    expect(screen.getByTestId('area-mode-only')).toHaveAttribute('aria-pressed', 'true');
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(screen.queryByTestId('area-region-name')).toBeNull();
+  });
+
+  it('allows choosing a town by name while map picking is unavailable', async () => {
+    const user = userEvent.setup();
+    const base = SCENARIOS['live-area-prefer'].createState();
+    const controller = new MockController({
+      initialState: { ...base, area: { mode: 'prefer', drawing: false, unavailable: 'No block locations for map picking.' } },
+    });
+    render(<Panel controller={controller} />);
+    await user.click(screen.getByRole('button', { name: 'Town' }));
+    expect(screen.getByRole('button', { name: 'Pick on map' })).toBeDisabled();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Town' }), 'Huntington town');
+    expect(screen.getByTestId('area-region-name')).toHaveTextContent('Huntington town');
+    expect(screen.getByTestId('area-counts')).toHaveTextContent('1,284 blocks');
+  });
+
+  it('with no area: says what it does, and offers Draw area and Use map view', async () => {
+    const user = userEvent.setup();
+    const actions: PanelAction[] = [];
+    const controller = new MockController({ initialScenario: 'live-single', onAction: (a) => actions.push(a) });
+    render(<Panel controller={controller} />);
+    const box = screen.getByTestId('area-control');
+    expect(box).toHaveTextContent("Mark where you'd like the swap to happen");
+    expect(within(box).queryByTestId('area-mode-prefer')).toBeNull();
+
+    await user.click(within(box).getByRole('button', { name: 'Use map view' }));
+    expect(actions).toContainEqual({ type: 'area-use-view' });
+    // The mock takes the view, counts what is inside, and drops the options (found without it).
+    expect(screen.getByTestId('area-counts')).toHaveTextContent('4,702 blocks, 312,845 people inside');
+    expect(screen.queryByTestId('solution-card-opt-1')).toBeNull();
+  });
+
+  it('drawing: shows how to draw and Cancel; finishing sets the area with Prefer on; Esc cancels a redraw', async () => {
+    const user = userEvent.setup();
+    const actions: PanelAction[] = [];
+    const controller = new MockController({ initialScenario: 'live-single', onAction: (a) => actions.push(a) });
+    render(<Panel controller={controller} />);
+
+    await user.click(screen.getByRole('button', { name: 'Draw area' }));
+    expect(actions).toContainEqual({ type: 'area-draw' });
+    expect(screen.getByTestId('area-draw-hint')).toHaveTextContent(
+      'Click the map to add corners. Double-click or click the first corner to finish. Esc cancels.',
+    );
+    expect(screen.queryByRole('button', { name: 'Draw area' })).toBeNull();
+    // Drawing alone changes nothing: the options found before are still on offer.
+    expect(screen.getByTestId('solution-card-opt-1')).toBeInTheDocument();
+
+    // Cancel a first drawing: back to no area.
+    await user.click(screen.getByTestId('area-cancel-draw-btn'));
+    expect(actions).toContainEqual({ type: 'area-cancel-draw' });
+    expect(screen.getByRole('button', { name: 'Draw area' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Draw area' }));
+    act(() => controller.finishAreaDraw());
+    expect(screen.getByTestId('area-counts')).toHaveTextContent('1,284 blocks, 61,530 people inside');
+    expect(screen.getByTestId('area-mode-prefer')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('area-mode-only')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('area-mode-explain')).toHaveTextContent(/Moves inside come first/);
+
+    // Redraw, then Esc: the area stays as it was.
+    await user.click(screen.getByRole('button', { name: 'Redraw' }));
+    expect(screen.getByTestId('area-draw-hint')).toHaveTextContent(/current area stays until you finish/);
+    await user.keyboard('{Escape}');
+    expect(actions.filter((a) => a.type === 'area-cancel-draw')).toHaveLength(2);
+    expect(screen.queryByTestId('area-draw-hint')).toBeNull();
+    expect(screen.getByTestId('area-counts')).toHaveTextContent('1,284 blocks');
+  });
+
+  it('the Prefer / Only switch dispatches set-area-mode and explains each; Clear removes the area', async () => {
+    const user = userEvent.setup();
+    const actions: PanelAction[] = [];
+    const controller = new MockController({ initialScenario: 'live-area-prefer', onAction: (a) => actions.push(a) });
+    render(<Panel controller={controller} />);
+
+    // Pressing the mode that is already on does nothing.
+    await user.click(screen.getByTestId('area-mode-prefer'));
+    expect(actions).toEqual([]);
+
+    await user.click(screen.getByRole('button', { name: 'Only' }));
+    expect(actions).toContainEqual({ type: 'set-area-mode', mode: 'only' });
+    expect(screen.getByTestId('area-mode-only')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('area-mode-explain')).toHaveTextContent('Nothing outside the area moves.');
+    // A new mode drops the options (they were found for the old one).
+    expect(screen.queryByTestId('solution-card-opt-1')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(actions).toContainEqual({ type: 'area-clear' });
+    expect(screen.getByRole('button', { name: 'Draw area' })).toBeInTheDocument();
+  });
+
+  it('cards: "Moves N blocks outside your area" when some go outside, "Inside your area" when none do; the solve note reads', () => {
+    const controller = new MockController({ initialScenario: 'live-area-prefer' });
+    render(<Panel controller={controller} />);
+
+    expect(screen.getByTestId('outside-area-opt-4')).toHaveTextContent('Moves 4 blocks outside your area.');
+    expect(screen.queryByTestId('inside-area-opt-4')).toBeNull();
+    for (const id of ['opt-1', 'opt-2', 'opt-3']) {
+      expect(screen.getByTestId(`inside-area-${id}`)).toHaveTextContent('Inside your area');
+      expect(screen.queryByTestId(`outside-area-${id}`)).toBeNull();
+    }
+    expect(screen.getByTestId('solve-note')).toHaveTextContent(/the last one moves 4 blocks outside it/);
+
+    // Without an area, cards say nothing about one.
+    act(() => controller.setScenario('live-single'));
+    expect(screen.queryByTestId('inside-area-opt-1')).toBeNull();
+    expect(screen.queryByTestId('outside-area-opt-4')).toBeNull();
+    expect(screen.queryByTestId('solve-note')).toBeNull();
+  });
+
+  it('one block outside reads in the singular, on plan cards too', () => {
+    const base = SCENARIOS['live-group-chain'].createState();
+    const [first, ...rest] = base.solutions;
+    const controller = new MockController({
+      initialState: {
+        ...base,
+        area: { ring: [[-74, 40.7], [-73.9, 40.7], [-73.9, 40.8]], mode: 'prefer', drawing: false },
+        solutions: [{ ...first, stats: { ...first.stats, outsideArea: 1 } }, ...rest.map((c) => ({ ...c, stats: { ...c.stats, outsideArea: 0 } }))],
+      },
+    });
+    render(<Panel controller={controller} />);
+    expect(screen.getByTestId(`outside-area-${first.id}`)).toHaveTextContent('Moves 1 block outside your area.');
+    expect(screen.getByTestId(`inside-area-${rest[0].id}`)).toBeInTheDocument();
+    // No counts yet (the state's data is still loading): says it is counting.
+    expect(screen.getByTestId('area-control')).toHaveTextContent('Counting blocks inside…');
+  });
+
+  it('Only with nothing inside: the controller\'s message reads under an area heading, with the ways out', async () => {
+    const user = userEvent.setup();
+    const actions: PanelAction[] = [];
+    const controller = new MockController({ initialScenario: 'live-area-only-none', onAction: (a) => actions.push(a) });
+    render(<Panel controller={controller} />);
+    const failed = screen.getByTestId('area-solve-failed');
+    expect(failed).toHaveTextContent('Nothing found in your area');
+    expect(failed).toHaveTextContent(/fewer than the 412 to move/);
+    expect(screen.queryByText(/Already at zero deviation/i)).toBeNull();
+
+    await user.click(within(failed).getByRole('button', { name: 'Prefer the area instead' }));
+    expect(actions).toContainEqual({ type: 'set-area-mode', mode: 'prefer' });
+    expect(screen.queryByTestId('area-solve-failed')).toBeNull();
+  });
+
+  it('an error message about something else keeps its own heading with an area set', () => {
+    const base = SCENARIOS['solve-error'].createState();
+    const controller = new MockController({
+      initialState: { ...base, area: { ring: [[-74, 40.7], [-73.9, 40.7], [-73.9, 40.8]], mode: 'only', drawing: false } },
+    });
+    render(<Panel controller={controller} />);
+    expect(screen.getByText(/Solver error/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('area-solve-failed')).toBeNull();
+  });
+
+  it('solving with an area: Prefer fills in from outside and says so; Only leaves the outside option out', async () => {
+    const user = userEvent.setup();
+    const base = SCENARIOS['live-single'].createState();
+    const area = { ring: [[-74, 40.7], [-73.9, 40.7], [-73.9, 40.8]] as Array<[number, number]>, mode: 'prefer' as const, drawing: false };
+    const controller = new MockController({ initialState: { ...base, area, solutions: [], solve: { status: 'idle' } } });
+    render(<Panel controller={controller} />);
+
+    await user.click(screen.getByRole('button', { name: /Find zeroing options/i }));
+    expect(screen.getByTestId('outside-area-opt-4')).toHaveTextContent('Moves 3 blocks outside your area.');
+    expect(screen.getByTestId('inside-area-opt-1')).toBeInTheDocument();
+    expect(screen.getByTestId('solve-note')).toHaveTextContent(/Only 3 options fit inside your area/);
+
+    await user.click(screen.getByRole('button', { name: 'Only' }));
+    await user.click(screen.getByRole('button', { name: /Find zeroing options/i }));
+    expect(screen.queryByTestId('solution-card-opt-4')).toBeNull();
+    expect(screen.getByTestId('inside-area-opt-3')).toBeInTheDocument();
+  });
+
+  it('unavailable: says why; without a DRA map only drawing is off; otherwise neither way works, Clear still does', () => {
+    const controller = new MockController({ initialScenario: 'live-area-unavailable' });
+    render(<Panel controller={controller} />);
+    expect(screen.getByTestId('area-unavailable')).toHaveTextContent(/No DRA map to draw on/);
+    expect(screen.getByRole('button', { name: 'Draw area' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Use map view' })).toBeEnabled();
+
+    act(() => controller.dispatch({ type: 'area-use-view' }));
+    expect(screen.getByRole('button', { name: 'Redraw' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Use map view' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Clear' })).toBeEnabled();
+
+    // On DRA's map but the state's data has no block points: nothing can mark an area.
+    act(() =>
+      controller.setState({
+        ...controller.getState(),
+        mapMode: 'dra',
+        area: { mode: 'prefer', drawing: false, unavailable: "This state's data has no block points yet, so an area can't be used." },
+      }),
+    );
+    expect(screen.getByTestId('area-unavailable')).toHaveTextContent(/no block points/);
+    expect(screen.getByRole('button', { name: 'Draw area' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Use map view' })).toBeDisabled();
+  });
+
+  it('without a DRA map, the mini-map shows for "Use map view" before anything can be previewed, and stays when an area is set', () => {
+    const cleanup = vi.fn();
+    const renderMiniMap = vi.fn((container: HTMLElement) => {
+      container.appendChild(document.createElement('canvas'));
+      return cleanup;
+    });
+    // One district, not solved yet: no options, no interaction view (scope 'one' never has one).
+    const base = SCENARIOS['live-single'].createState();
+    const unavailable = 'Drawing an area needs DRA\'s map, which the extension cannot reach on this page. "Use map view" takes the part of the panel\'s map in view.';
+    const controller = new MockController({
+      initialState: { ...base, mapMode: 'mini', solutions: [], hoveredSolutionId: undefined, interaction: undefined, solve: { status: 'idle' }, area: { mode: 'prefer', drawing: false, unavailable } },
+    });
+    render(<Panel controller={controller} renderMiniMap={renderMiniMap} />);
+    expect(screen.getByRole('button', { name: 'Use map view' })).toBeEnabled();
+    expect(screen.getByTestId('minimap-slot')).toBeInTheDocument();
+    expect(renderMiniMap).toHaveBeenCalledTimes(1);
+    // An area set from that view drops the options (there were none): the mini-map stays mounted.
+    act(() => controller.setState({ ...controller.getState(), area: { mode: 'prefer', drawing: false, unavailable, ring: [[-74, 40.7], [-73.9, 40.7], [-73.9, 40.8]], blocks: 12, people: 340 } }));
+    expect(screen.getByTestId('minimap-slot')).toBeInTheDocument();
+    expect(renderMiniMap).toHaveBeenCalledTimes(1);
+    expect(cleanup).not.toHaveBeenCalled();
+    // In CSV mode there is no area card to serve, so nothing to preview means no mini-map.
+    act(() => controller.setState({ ...controller.getState(), connection: 'csv', area: undefined }));
+    expect(screen.queryByTestId('minimap-slot')).toBeNull();
+  });
+
+  it('is not shown during a walkthrough', () => {
+    const base = SCENARIOS['walkthrough-live'].createState();
+    const controller = new MockController({ initialState: { ...base, area: { mode: 'prefer', drawing: false, ring: [[-74, 40.7], [-73.9, 40.7], [-73.9, 40.8]] } } });
+    render(<Panel controller={controller} />);
+    expect(screen.queryByTestId('area-control')).toBeNull();
+  });
+});
+
+describe('Panel — Undo', () => {
+  it('hides the Undo button when PanelState.undo is absent, and shows its label when set', async () => {
+    const user = userEvent.setup();
+    const actions: PanelAction[] = [];
+    const base = SCENARIOS['walkthrough-live'].createState();
+    const controller = new MockController({
+      initialState: { ...base, undo: undefined },
+      onAction: (a) => actions.push(a),
+    });
+
+    render(<Panel controller={controller} />);
+    expect(screen.queryByTestId('undo-btn')).toBeNull();
+
+    act(() =>
+      controller.setState({
+        ...controller.getState(),
+        undo: { kind: 'paint', label: 'Undo painting step 3' },
+      }),
+    );
+
+    const btn = screen.getByTestId('undo-btn');
+    expect(btn).toHaveTextContent('Undo painting step 3');
+    expect(btn).toHaveAttribute('data-undo-kind', 'paint');
+
+    await user.click(btn);
+    expect(actions).toContainEqual({ type: 'undo' });
+  });
+
+  it('triggers Undo on Cmd/Ctrl+Z inside the side panel, but ignores Shift+Z and text inputs', () => {
+    const actions: PanelAction[] = [];
+    const base = SCENARIOS['live-single'].createState();
+    const controller = new MockController({
+      initialState: { ...base, undo: { kind: 'setting', label: 'Undo unlock all' } },
+      onAction: (a) => actions.push(a),
+    });
+
+    render(<Panel controller={controller} />);
+    expect(screen.getByTestId('undo-btn')).toHaveTextContent('Undo unlock all');
+
+    // Shift+Ctrl+Z (Redo) does not trigger undo.
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true, shiftKey: true });
+    expect(actions.filter((a) => a.type === 'undo')).toHaveLength(0);
+
+    // Text input keeps native undo.
+    const input = document.createElement('input');
+    input.type = 'text';
+    document.body.appendChild(input);
+    try {
+      fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+      expect(actions.filter((a) => a.type === 'undo')).toHaveLength(0);
+    } finally {
+      input.remove();
+    }
+
+    // Ctrl+Z triggers undo.
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+    expect(actions).toContainEqual({ type: 'undo' });
+
+    // Cmd+Z triggers undo too.
+    act(() =>
+      controller.setState({
+        ...controller.getState(),
+        undo: { kind: 'setting', label: 'Undo clearing area' },
+      }),
+    );
+    fireEvent.keyDown(window, { key: 'z', metaKey: true });
+    expect(actions.filter((a) => a.type === 'undo')).toHaveLength(2);
+  });
+
+  it('restores locks after Unlock all and clears Undo once undone', async () => {
+    const user = userEvent.setup();
+    const base = SCENARIOS['live-single'].createState();
+    const controller = new MockController({
+      initialState: { ...base, lockedDistricts: [5, 7] },
+    });
+
+    render(<Panel controller={controller} />);
+    await user.click(screen.getByTestId('unlock-all'));
+    expect(controller.getState().lockedDistricts).toEqual([]);
+    expect(screen.getByTestId('undo-btn')).toHaveTextContent('Undo unlock all');
+
+    await user.click(screen.getByTestId('undo-btn'));
+    expect(controller.getState().lockedDistricts).toEqual([5, 7]);
+    expect(screen.queryByTestId('undo-btn')).toBeNull();
+  });
+});
+
+describe('Panel — Aim for goal (−1 · Zero · +1) in one-district mode', () => {
+  it('shows Aim for in one-district mode with Zero selected by default, hidden in group and whole-map modes', async () => {
+    const user = userEvent.setup();
+    const controller = new MockController({ initialScenario: 'live-single' });
+    render(<Panel controller={controller} />);
+
+    const goalControl = screen.getByTestId('goal-control');
+    expect(goalControl).toHaveTextContent('Aim for');
+    expect(screen.getByTestId('goal-minus-1')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('goal-zero')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('goal-plus-1')).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(screen.getByRole('button', { name: 'Group' }));
+    expect(screen.queryByTestId('goal-control')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Whole map' }));
+    expect(screen.queryByTestId('goal-control')).toBeNull();
+  });
+
+  it('picking +1 or −1 updates scope, header, chooser numbers and solve; picking Zero clears goal', async () => {
+    const user = userEvent.setup();
+    const actions: PanelAction[] = [];
+    const controller = new MockController({ initialScenario: 'live-single', onAction: (a) => actions.push(a) });
+    render(<Panel controller={controller} />);
+
+    // District 13 is +412 over; target 776,971; neighbor 12 is −380.
+    // Pick neighbor 12 first, then switch goal to +1: `with` is kept.
+    await user.click(screen.getByRole('checkbox', { name: 'Give to District 12' }));
+    await user.click(screen.getByTestId('goal-plus-1'));
+    expect(actions[actions.length - 1]).toEqual({
+      type: 'set-scope',
+      scope: { mode: 'one', district: 13, with: [12], goal: 1 },
+    });
+    expect(screen.getByTestId('goal-plus-1')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('goal-zero')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByText('Goal +1')).toBeInTheDocument();
+    expect(screen.getByText(/Goal pop 776,972/)).toBeInTheDocument();
+    // +412 aiming for +1 gives 411 people; D12 (−380) would become +31.
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent('District 13 gives 411 people to District 12 only.');
+    expect(screen.getByTestId('chooser-row-12')).toHaveTextContent(/District 12\s*−380\s*→\s*\+31/);
+
+    // Switch to −1: gives 413 people; D12 (−380) would become +33.
+    await user.click(screen.getByTestId('goal-minus-1'));
+    expect(actions[actions.length - 1]).toEqual({
+      type: 'set-scope',
+      scope: { mode: 'one', district: 13, with: [12], goal: -1 },
+    });
+    expect(screen.getByText('Goal −1')).toBeInTheDocument();
+    expect(screen.getByText(/Goal pop 776,970/)).toBeInTheDocument();
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent('District 13 gives 413 people to District 12 only.');
+    expect(screen.getByTestId('chooser-row-12')).toHaveTextContent(/District 12\s*−380\s*→\s*\+33/);
+
+    // Solve with goal −1: card moves 413 and lands D13 at −1.
+    await user.click(screen.getByRole('button', { name: /Find options for −1/i }));
+    const card = screen.getByTestId('solution-card-opt-13-to-12');
+    expect(card).toHaveTextContent('413');
+    expect(card).toHaveTextContent(/District 13:\s*\+412\s*→\s*−1/);
+
+    // Picking Zero clears goal (dispatch set-scope without goal) while keeping `with`.
+    await user.click(screen.getByTestId('goal-zero'));
+    expect(actions[actions.length - 1]).toEqual({
+      type: 'set-scope',
+      scope: { mode: 'one', district: 13, with: [12] },
+    });
+    expect('goal' in controller.getState().scope).toBe(false);
+    expect(screen.getByTestId('goal-zero')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent('District 13 gives 412 people to District 12 only.');
+  });
+
+  it('district at 0: direction flips for +1 (takes 1) and −1 (gives 1); already-at-goal hides chooser and reports message', async () => {
+    const user = userEvent.setup();
+    const base = SCENARIOS['live-single'].createState();
+    // District 7 is at 0 in NY_26_SPEC (neighbors [4, 5, 6, 8, 9, 11]; D4 is +410, D8 is −340).
+    const controller = new MockController({
+      initialState: { ...base, scope: { mode: 'one', district: 7 }, solutions: [], solve: { status: 'idle' } },
+    });
+    render(<Panel controller={controller} />);
+
+    // At 0 with Zero: chooser hidden, Aim for visible.
+    expect(screen.queryByTestId('neighbor-chooser')).toBeNull();
+    expect(screen.getByTestId('goal-control')).toBeInTheDocument();
+
+    // Aim for +1: District 7 must TAKE 1 person; D4 (+410 -> +409).
+    await user.click(screen.getByTestId('goal-plus-1'));
+    expect(screen.getByTestId('neighbor-chooser')).toBeInTheDocument();
+    expect(within(screen.getByTestId('neighbor-chooser')).getByText('Take from')).toBeInTheDocument();
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent('District 7 takes 1 person from any neighbor');
+    expect(screen.getByTestId('chooser-row-4')).toHaveTextContent(/\+410\s*→\s*\+409/);
+
+    // Aim for −1: District 7 must GIVE 1 person; D8 (−340 -> −339).
+    await user.click(screen.getByTestId('goal-minus-1'));
+    expect(within(screen.getByTestId('neighbor-chooser')).getByText('Give to')).toBeInTheDocument();
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent('District 7 gives 1 person to any neighbor');
+    expect(screen.getByTestId('chooser-row-8')).toHaveTextContent(/−340\s*→\s*−339/);
+
+    // District already at −1 with goal −1: chooser hidden, solve says "District 7 is already at −1."
+    act(() => {
+      const s = controller.getState();
+      controller.setState({
+        ...s,
+        districts: s.districts.map((d) => (d.index === 7 ? { ...d, pop: s.map!.target - 1, deviation: -1 } : d)),
+      });
+    });
+    expect(screen.queryByTestId('neighbor-chooser')).toBeNull();
+    await user.click(screen.getByRole('button', { name: /Find options for −1/i }));
+    expect(screen.getByText('✓ Already at −1')).toBeInTheDocument();
+    expect(screen.getByText('District 7 is already at −1.')).toBeInTheDocument();
+  });
+
+  it('keeps goal when the same district is clicked again or a neighbor changes, and resets for another district', async () => {
+    const user = userEvent.setup();
+    const controller = new MockController({ initialScenario: 'live-single' });
+    render(<Panel controller={controller} />);
+
+    await user.click(screen.getByTestId('goal-plus-1'));
+    expect(controller.getState().scope).toEqual({ mode: 'one', district: 13, goal: 1 });
+
+    // Toggling a neighbor keeps goal.
+    await user.click(screen.getByRole('checkbox', { name: 'Give to District 12' }));
+    expect(controller.getState().scope).toEqual({ mode: 'one', district: 13, with: [12], goal: 1 });
+
+    // Locking that neighbor removes it from `with` and keeps goal.
+    await user.click(screen.getByRole('button', { name: 'Lock District 12' }));
+    expect(controller.getState().scope).toEqual({ mode: 'one', district: 13, goal: 1 });
+
+    // Clicking District 13 again keeps goal; clicking District 5 resets goal.
+    const list = screen.getByRole('region', { name: /District population list/i });
+    const rowOf = (name: string) => within(list).getAllByRole('button').find((b) => b.textContent?.includes(name))!;
+    await user.click(rowOf('District 13'));
+    expect(controller.getState().scope).toEqual({ mode: 'one', district: 13, goal: 1 });
+
+    await user.click(rowOf('District 5'));
+    expect(controller.getState().scope).toEqual({ mode: 'one', district: 5 });
+    expect(screen.getByTestId('goal-zero')).toHaveAttribute('aria-pressed', 'true');
+  });
+});

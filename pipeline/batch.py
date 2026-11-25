@@ -24,7 +24,7 @@ def bundle_signature(directory, districts):
     try:
         manifest = json_file(manifest_path)
         refs = [manifest["attrs"], *manifest["counties"]]
-        refs.extend(manifest[key] for key in ("water", "towns") if key in manifest)
+        refs.extend(manifest[key] for key in ("water", "towns", "points", "names", "outlines") if key in manifest)
         if not all(file_matches(directory / ref["file"], ref) for ref in refs):
             return None
     except (OSError, ValueError, KeyError, TypeError):

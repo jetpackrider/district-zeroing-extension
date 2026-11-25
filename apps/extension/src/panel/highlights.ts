@@ -3,7 +3,7 @@
  * per-county geometry, and sends it to DRA's map (via the hook) or to the mini-map.
  */
 import type { BundleSource, CountyGeometry, StateBundle } from '@zd/contracts';
-import type { BBox, HighlightFC, HighlightFeatureProps } from '../shared/protocol';
+import type { AreaRing, BBox, ClusterFC, HighlightFC, HighlightFeatureProps } from '../shared/protocol';
 import { bboxOf, labelPoint } from './walkthrough';
 
 export interface HighlightItem {
@@ -16,6 +16,18 @@ export interface HighlightSink {
   show(fc: HighlightFC, fit?: BBox): void;
   clear(): void;
   fit(bbox: BBox): void;
+}
+
+/** The mini-map's side of the user's area: show its outline, and say what is in view ("Use map view"). */
+export interface AreaSink {
+  show(ring: AreaRing | null): void;
+  /** The part of the map in view as a ring of its corners; null when the map has no size yet. */
+  view(): AreaRing | null;
+}
+
+/** The mini-map's side of the county clusters: the outlines of the hovered clustering (null = none). */
+export interface ClusterSink {
+  show(fc: ClusterFC | null): void;
 }
 
 export class GeometryCache {

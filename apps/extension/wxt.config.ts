@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import type { BundleManifest } from '@zd/contracts';
 import { defineConfig } from 'wxt';
 
 /**
@@ -29,14 +30,15 @@ function localStates(): string[] {
   return states;
 }
 
-/** Only the files a state's manifest names (manifest, attrs, water, towns, one file per county); never fixtures/ or anything else in data/. */
+/** Only the files a state's manifest references, plus the manifest itself. */
 function embeddedFiles(state: string): Array<{ absoluteSrc: string; relativeDest: string }> {
   const dir = join(DATA_ROOT, state);
   const manifestPath = join(dir, 'manifest.json');
   if (!existsSync(manifestPath)) throw new Error(`build:local: no bundle for ${state} (${manifestPath} is missing)`);
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { state: string; attrs: { file: string }; water?: { file: string }; towns?: { file: string }; counties: Array<{ file: string }> };
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as BundleManifest;
   if (manifest.state !== state) throw new Error(`build:local: ${manifestPath} is for ${manifest.state}, not ${state}`);
-  const files = ['manifest.json', manifest.attrs.file, ...(manifest.water ? [manifest.water.file] : []), ...(manifest.towns ? [manifest.towns.file] : []), ...manifest.counties.map((c) => c.file)];
+  const refs = [manifest.attrs, manifest.water, manifest.towns, manifest.points, manifest.names, manifest.outlines, ...manifest.counties];
+  const files = ['manifest.json', ...refs.flatMap((ref) => ref ? [ref.file] : [])];
   return files.map((f) => {
     if (!/^[\w.-]+$/.test(f)) throw new Error(`build:local: unexpected file name ${f}`);
     const absoluteSrc = join(dir, f);

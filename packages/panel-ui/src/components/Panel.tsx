@@ -2,9 +2,11 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import type { ChangeEvent, DragEvent } from 'react';
 import type { ConnectionStatus, PanelAction } from '@zd/contracts';
 import type { PanelProps } from '../types';
-import { formatDistrictShort, formatSolutionTitle, solutionBadges } from '../format';
+import { formatDistrictShort, formatSigned, formatSolutionTitle, solutionBadges } from '../format';
 import { ensurePanelStyles } from '../styles/injectStyles';
 import { AboutView } from './AboutView';
+import { AreaControl } from './AreaControl';
+import { ClustersView } from './ClustersView';
 import { ConnectionView } from './ConnectionView';
 import { CsvDropZone } from './CsvDropZone';
 import { DistrictPicker } from './DistrictPicker';
@@ -115,6 +117,33 @@ export function Panel({ controller, renderMiniMap, className }: PanelProps) {
   const badge = statusBadgeMeta(state.connection);
   const isWorkingMode = state.connection === 'live' || state.connection === 'csv';
 
+  // Cmd/Ctrl+Z inside the side panel triggers PanelState.undo (never runs on DRA's page).
+  useEffect(() => {
+    if (!state.undo || showAbout || !isWorkingMode) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (e.key.toLowerCase() !== 'z') return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'TEXTAREA' ||
+          target.isContentEditable ||
+          (target.tagName === 'INPUT' &&
+            !['checkbox', 'radio', 'button', 'submit', 'reset', 'file'].includes(
+              (target as HTMLInputElement).type.toLowerCase(),
+            )))
+      ) {
+        return;
+      }
+      if (state.undo?.kind === 'paint' && state.autoPaint?.busy) return;
+      e.preventDefault();
+      dispatch({ type: 'undo' });
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [state.undo, state.autoPaint?.busy, showAbout, isWorkingMode, dispatch]);
+
   // Choose which plan's flows to overlay on the InteractionView
   const hoveredIdx = state.hoveredSolutionId
     ? state.solutions.findIndex((s) => s.id === state.hoveredSolutionId)
@@ -131,14 +160,21 @@ export function Panel({ controller, renderMiniMap, className }: PanelProps) {
     Boolean(hoveredBorder) ||
     state.solutions.length > 0 ||
     Boolean(state.interaction && state.interaction.edges.length > 0);
+  // "Use map view" with no DRA map takes the mini-map's view (AreaState), so on a live map the
+  // mini-map shows whenever the area card is up, before anything can be previewed: one-district
+  // scope before a solve, after an area change dropped the options, whole maps with no
+  // interaction view. Without it the button would have no view to take.
+  const miniForArea = state.connection === 'live' && state.area !== undefined;
   const showOutsideMiniMap =
-    isWorkingMode && !state.walkthrough && state.mapMode === 'mini' && hasPreviewableTarget;
+    isWorkingMode && !state.walkthrough && state.mapMode === 'mini' && (hasPreviewableTarget || miniForArea);
 
   const miniMapSubCaption = activePlanTitle
     ? `Showing ${activePlanTitle}`
     : hoveredBorder
       ? `Border ${formatDistrictShort(hoveredBorder.a, state.districts)} ↔ ${formatDistrictShort(hoveredBorder.b, state.districts)}`
-      : 'Hover a border or option to preview';
+      : hasPreviewableTarget
+        ? 'Hover a border or option to preview'
+        : 'Move this map to the part you want, then press "Use map view"';
 
   return (
     <div
@@ -157,7 +193,9 @@ export function Panel({ controller, renderMiniMap, className }: PanelProps) {
         <div className="zd-topbar__left">
           <span className="zd-brand">Zero Deviation</span>
           <span
-            className={`zd-status-pill${badge.variant !== 'idle' ? ` zd-status-pill--${badge.variant}` : ''}`}
+            className={`zd-pill zd-pill--${{
+              live: 'zero', csv: 'accent', connecting: 'accent', warn: 'warn', error: 'error', idle: 'neutral',
+            }[badge.variant]}`}
             data-testid="connection-pill"
           >
             <span className="zd-status-pill__dot" aria-hidden="true" />
@@ -201,6 +239,26 @@ export function Panel({ controller, renderMiniMap, className }: PanelProps) {
 
       {/* Notice banner */}
       {state.notice && <NoticeBanner notice={state.notice} />}
+
+      {/* Single Undo bar for extension paints and destructive panel setting changes */}
+      {state.undo && !showAbout && isWorkingMode && (
+        <div className="zd-undo-bar" data-testid="undo-bar" role="region" aria-label="Undo">
+          <button
+            type="button"
+            className="zd-btn zd-btn--sm zd-undo-btn"
+            data-testid="undo-btn"
+            data-undo-kind={state.undo.kind}
+            disabled={state.undo.kind === 'paint' && Boolean(state.autoPaint?.busy)}
+            title={`${state.undo.label} (Ctrl+Z / ⌘Z)`}
+            onClick={() => dispatch({ type: 'undo' })}
+          >
+            <span aria-hidden="true">↶</span>
+            <span className="zd-undo-btn__label">
+              {/^undo\b/i.test(state.undo.label) ? state.undo.label : `Undo: ${state.undo.label}`}
+            </span>
+          </button>
+        </div>
+      )}
 
       {/* Main view router */}
       {showAbout ? (
@@ -261,13 +319,23 @@ export function Panel({ controller, renderMiniMap, className }: PanelProps) {
 
           {state.scope.mode === 'one' && <NeighborChooser state={state} dispatch={dispatch} />}
 
+          {/* Where the user would like the swap to happen: applies to every scope, so it sits just above Solve. */}
+          <AreaControl state={state} dispatch={dispatch} />
+
+          {/* County clusters (collapsed until opened); any cluster can become the area above. */}
+          <ClustersView state={state} dispatch={dispatch} />
+
           <SolveSection state={state} dispatch={dispatch} />
 
           {state.solutions.length > 0 && (
             <section className="zd-solutions-list" aria-label="Balancing solutions">
-              <div className="zd-section-head" style={{ marginBottom: 0, paddingLeft: 2 }}>
+              <div className="zd-section-head">
                 <h3 className="zd-section-title">
-                  {state.scope.mode === 'one' ? 'Zeroing options' : 'Balancing plans'} (
+                  {state.scope.mode === 'one'
+                    ? state.scope.goal !== undefined
+                      ? `Options for ${formatSigned(state.scope.goal)}`
+                      : 'Zeroing options'
+                    : 'Balancing plans'} (
                   {state.solutions.length})
                 </h3>
               </div>

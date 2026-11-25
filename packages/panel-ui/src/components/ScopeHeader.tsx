@@ -1,5 +1,6 @@
 import type { PanelAction, PanelState, Scope } from '@zd/contracts';
 import {
+  MINUS,
   formatDeviationPhrase,
   formatDistrictName,
   formatInt,
@@ -54,11 +55,17 @@ export function ScopeHeader({ state, dispatch }: ScopeHeaderProps) {
     const row = districts.find((d) => d.index === scope.district);
     if (row) {
       headlineSwatch = row.color;
-      headlineTone = getDeviationTone(row.deviation, map);
+      headlineTone = scope.goal !== undefined
+        ? (row.deviation === scope.goal ? 'zero' : null)
+        : getDeviationTone(row.deviation, map);
       headlineText = `${formatDistrictName(row.index, districts)}: ${formatDeviationPhrase(row.deviation)}`;
+      if (scope.goal !== undefined) {
+        headlineBadge = `Goal ${formatSigned(scope.goal)}`;
+      }
       subItems = [
         `Pop ${formatInt(row.pop)}`,
         ...(map ? [`Target ${formatInt(map.target)}`] : []),
+        ...(map && scope.goal !== undefined ? [`Goal pop ${formatInt(map.target + scope.goal)}`] : []),
       ];
     }
   } else if (scope.mode === 'group') {
@@ -91,6 +98,21 @@ export function ScopeHeader({ state, dispatch }: ScopeHeaderProps) {
     ];
   }
 
+  const setGoal = (nextGoal: -1 | 1 | undefined) => {
+    if (scope.mode !== 'one') return;
+    if (nextGoal === undefined && scope.goal === undefined) return;
+    if (nextGoal !== undefined && scope.goal === nextGoal) return;
+    dispatch({
+      type: 'set-scope',
+      scope: {
+        mode: 'one',
+        district: scope.district,
+        ...(scope.with && scope.with.length > 0 ? { with: scope.with } : {}),
+        ...(nextGoal !== undefined ? { goal: nextGoal } : {}),
+      },
+    });
+  };
+
   return (
     <section className="zd-card" aria-label="Selected scope summary">
       {map && (
@@ -114,7 +136,7 @@ export function ScopeHeader({ state, dispatch }: ScopeHeaderProps) {
         )}
         <span className="zd-focus-headline__text zd-num">{headlineText}</span>
         {headlineBadge && (
-          <span className={`zd-dev ${headlineTone ? `zd-dev--${headlineTone}` : ''}`}>
+          <span className={`zd-pill zd-num ${headlineTone ? `zd-pill--${headlineTone}` : ''}`}>
             {headlineBadge}
           </span>
         )}
@@ -131,7 +153,7 @@ export function ScopeHeader({ state, dispatch }: ScopeHeaderProps) {
       <div className="zd-segmented" role="group" aria-label="Balancing scope">
         <button
           type="button"
-          className="zd-segmented__btn"
+          className="zd-btn zd-btn--sm zd-segmented__btn"
           aria-pressed={scope.mode === 'one'}
           onClick={() => switchMode('one')}
         >
@@ -139,7 +161,7 @@ export function ScopeHeader({ state, dispatch }: ScopeHeaderProps) {
         </button>
         <button
           type="button"
-          className="zd-segmented__btn"
+          className="zd-btn zd-btn--sm zd-segmented__btn"
           aria-pressed={scope.mode === 'group'}
           onClick={() => switchMode('group')}
         >
@@ -147,13 +169,48 @@ export function ScopeHeader({ state, dispatch }: ScopeHeaderProps) {
         </button>
         <button
           type="button"
-          className="zd-segmented__btn"
+          className="zd-btn zd-btn--sm zd-segmented__btn"
           aria-pressed={scope.mode === 'all'}
           onClick={() => switchMode('all')}
         >
           Whole map
         </button>
       </div>
+
+      {scope.mode === 'one' && (
+        <div className="zd-goal-row" data-testid="goal-control">
+          <span className="zd-goal-row__label">Aim for</span>
+          <div className="zd-segmented zd-segmented--goal" role="group" aria-label="Aim for">
+            <button
+              type="button"
+              className="zd-btn zd-btn--sm zd-segmented__btn zd-num"
+              data-testid="goal-minus-1"
+              aria-pressed={scope.goal === -1}
+              onClick={() => setGoal(-1)}
+            >
+              {MINUS}1
+            </button>
+            <button
+              type="button"
+              className="zd-btn zd-btn--sm zd-segmented__btn"
+              data-testid="goal-zero"
+              aria-pressed={scope.goal === undefined}
+              onClick={() => setGoal(undefined)}
+            >
+              Zero
+            </button>
+            <button
+              type="button"
+              className="zd-btn zd-btn--sm zd-segmented__btn zd-num"
+              data-testid="goal-plus-1"
+              aria-pressed={scope.goal === 1}
+              onClick={() => setGoal(1)}
+            >
+              +1
+            </button>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

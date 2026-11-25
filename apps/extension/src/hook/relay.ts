@@ -58,8 +58,14 @@ export function startRelay(): void {
     port.onDisconnect.addListener(() => {
       panels.delete(port);
       // The panel closed (or moved to another tab): nothing is left to explain the highlights on
-      // DRA's map, so take them off.
-      if (panels.size === 0) hookPort?.postMessage(wrap<PanelToHook>({ t: 'clear-highlight' }));
+      // DRA's map, so take them off, with the area and cluster outlines, and stop any drawing (its clicks would
+      // otherwise go nowhere). A reopened panel puts the area back.
+      if (panels.size === 0 && hookPort) {
+        hookPort.postMessage(wrap<PanelToHook>({ t: 'clear-highlight' }));
+        hookPort.postMessage(wrap<PanelToHook>({ t: 'area-draw-cancel' }));
+        hookPort.postMessage(wrap<PanelToHook>({ t: 'area-show', ring: null }));
+        hookPort.postMessage(wrap<PanelToHook>({ t: 'clusters-show', fc: null }));
+      }
     });
     port.onMessage.addListener((data) => {
       const m = unwrap<PanelToHook>(data);

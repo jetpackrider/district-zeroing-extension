@@ -48,8 +48,8 @@ export function MiniMapSlot({
   }
 
   return (
-    <section className="zd-card zd-minimap-card" aria-label="Mini-map preview">
-      <div className="zd-section-head" style={{ marginBottom: 6 }}>
+    <section className="zd-card" aria-label="Mini-map preview">
+      <div className="zd-section-head">
         <h3 className="zd-section-title">{caption}</h3>
         {subCaption && (
           <span className="zd-minimap-card__sub zd-num">{subCaption}</span>

@@ -1,7 +1,9 @@
 import type { EngineGraph, PopField, StateBundle } from '@zd/contracts';
 
 export { BrowserBundleSource } from './browser';
-export { decodeAttrs, decodeCounty, decodeManifest } from './decode';
+export type { BundleReadOptions } from './cache';
+export { decodeAttrs, decodeCounty, decodeManifest, decodeNames, decodeOutlines, decodePoints } from './decode';
+export type { CountyOutline, CountyOutlines } from './decode';
 
 /** Return the sorted block index, or -1 for a GEOID outside the bundle. */
 export function geoidIndex(bundle: StateBundle, geoid: string): number {

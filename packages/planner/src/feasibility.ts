@@ -62,6 +62,8 @@ export interface FeasibilityRequest {
   absorbers?: number[];
   /** With `allowOutsideAbsorb` and no `absorbers`: Unassigned may take or give too. */
   includeUnassigned?: boolean;
+  /** Exact deviation goals for some members, against targets.draTarget (GroupSolveRequest.goals). */
+  goals?: Record<number, -1 | 0 | 1>;
 }
 
 function normalizeDistricts(districts: number[], numDistricts: number): number[] {
@@ -88,6 +90,11 @@ export function analyzeGroup(
   const supply = unassignedAllowed ? unassignedSupply(req.graph, req.assignment, k) : undefined;
 
   // Connected components of the selection in the district adjacency graph.
+  const hi = extraSlot(targets);
+  const memberBand = (d: number): [number, number] => {
+    const g = req.goals?.[d];
+    return g !== undefined ? [targets.draTarget + g, targets.draTarget + g] : [targets.q, targets.q + hi];
+  };
   const seen = new Uint8Array(k + 1);
   const components: GroupComponent[] = [];
   for (const start of members) {
@@ -104,8 +111,15 @@ export function analyzeGroup(
     const outside = new Set<number>();
     for (const d of comp) for (const nb of adjacency[d]) if (!inGroup[nb]) outside.add(nb);
     let pop = 0;
-    for (const d of comp) pop += pops[d];
-    const excess = populationExcess(pop, comp.length, targets);
+    let lo = 0;
+    let max = 0;
+    for (const d of comp) {
+      pop += pops[d];
+      const [dLo, dHi] = memberBand(d);
+      lo += dLo;
+      max += dHi;
+    }
+    const excess = pop > max ? pop - max : pop < lo ? pop - lo : 0;
     const touchesUnassigned = comp.some((d) => contact[d] === 1);
     components.push({
       members: comp,
@@ -114,7 +128,7 @@ export function analyzeGroup(
       outsideNeighbors: [...outside].sort((a, b) => a - b),
       touchesUnassigned,
       unassignedPeople: touchesUnassigned && supply ? supply.peopleNear(comp) : 0,
-      extraCount: excess === 0 ? pop - comp.length * targets.q : 0,
+      extraCount: excess === 0 ? pop - lo : 0,
     });
   }
 
@@ -144,12 +158,21 @@ export function analyzeGroup(
 
   // Report the worst blocked component (largest |excess|, then lowest district).
   const worst = [...blocked].sort((a, b) => Math.abs(b.excess) - Math.abs(a.excess) || a.members[0] - b.members[0])[0];
-  const hi = extraSlot(targets);
+  let worstLo = 0;
+  let worstHi = 0;
+  for (const d of worst.members) {
+    const [dLo, dHi] = memberBand(d);
+    worstLo += dLo;
+    worstHi += dHi;
+  }
   const suggestions: Array<{ d: number; after: number }> = [];
   for (const o of worst.outsideNeighbors) {
     const helps = worst.excess > 0 ? pops[o] < targets.q : pops[o] > targets.q + hi;
     if (!helps) continue;
-    const after = populationExcess(worst.pop + pops[o], worst.members.length + 1, targets);
+    const afterPop = worst.pop + pops[o];
+    const afterLo = worstLo + targets.q;
+    const afterHi = worstHi + targets.q + hi;
+    const after = afterPop > afterHi ? afterPop - afterHi : afterPop < afterLo ? afterPop - afterLo : 0;
     if (Math.abs(after) < Math.abs(worst.excess)) suggestions.push({ d: o, after });
   }
   suggestions.sort((a, b) => Math.abs(a.after) - Math.abs(b.after) || a.d - b.d);

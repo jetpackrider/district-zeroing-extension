@@ -81,6 +81,20 @@ test('store build: goes live on NY with data from the published host, and contac
   await expect(diag).toContainText('all 27 match (incl. Unassigned)', { timeout: 60_000 });
   await expect(diag).toContainText('all required hooks OK');
 
+  // The area (PanelState.area) needs the bundle's block points. A data host without the points
+  // sidecar must still work: the area is marked unavailable, with the reason, and solving works.
+  await expect(diag).toContainText(/block points in bundle: (yes|no)/, { timeout: 60_000 });
+  const points = /block points in bundle: yes/.test((await diag.textContent()) ?? '');
+  console.log(`  store build: block points from the host: ${points ? 'yes' : 'no (area unavailable)'}`);
+  if (points) {
+    await expect(panel.getByTestId('area-unavailable')).toHaveCount(0);
+    await expect(panel.getByTestId('area-draw-btn')).toBeEnabled();
+  } else {
+    await expect(panel.getByTestId('area-unavailable')).toContainText('no block locations');
+    await expect(panel.getByTestId('area-draw-btn')).toBeDisabled();
+    await expect(panel.getByTestId('area-use-view-btn')).toBeDisabled();
+  }
+
   // The real UI path: pick the whole map and solve.
   await panel.getByRole('button', { name: 'Whole map' }).click();
   await panel.getByRole('button', { name: /find|plan|solve/i }).first().click();
