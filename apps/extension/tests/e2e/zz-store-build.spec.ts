@@ -83,8 +83,9 @@ test('store build: goes live on NY with data from the published host, and contac
 
   // The area (PanelState.area) needs the bundle's block points. A data host without the points
   // sidecar must still work: the area is marked unavailable, with the reason, and solving works.
-  await expect(diag).toContainText(/block points in bundle: (yes|no)/, { timeout: 60_000 });
-  const points = /block points in bundle: yes/.test((await diag.textContent()) ?? '');
+  // Diagnostics list the area only once one exists, so ask the host's manifest directly.
+  const hosted = await (await fetch(`https://${DATA_HOST}/zero-deviation-data/v1/NY/manifest.json`)).json();
+  const points = Boolean(hosted.points);
   console.log(`  store build: block points from the host: ${points ? 'yes' : 'no (area unavailable)'}`);
   if (points) {
     await expect(panel.getByTestId('area-unavailable')).toHaveCount(0);
