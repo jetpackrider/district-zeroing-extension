@@ -1,7 +1,9 @@
 /**
  * CSV fallback (SPEC "Exports, the fallback path"): DRA's block assignment CSV.
  * Header GEOID20,District (skipped); ',' or '|' separators; custom district labels allowed;
- * unassigned blocks are left out; only committed edits are included.
+ * unassigned blocks are left out; only committed edits are included. A row whose district is "0"
+ * (a hand-made file marking unassigned blocks) is read as unassigned too, so it cannot shift the
+ * numbering of the real districts.
  */
 
 export interface ParsedCsv {
@@ -31,7 +33,7 @@ export function parseBlockCsv(text: string): ParsedCsv {
       errors.push(`line ${i + 1}: bad GEOID ${geoid}`);
       return;
     }
-    if (!label) return;
+    if (!label || /^0+$/.test(label)) return;
     rows.push({ geoid, label });
     if (!seen.has(label)) {
       seen.add(label);

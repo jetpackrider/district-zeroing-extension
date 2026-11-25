@@ -12,7 +12,14 @@ export type VerificationResult = { ok: true } | { ok: false; error: string };
 
 const fail = (error: string): VerificationResult => ({ ok: false, error });
 
-/** Independent replay and full-map component labeling. No solver implementation is used. */
+/**
+ * Independent replay and full-map component labeling. No solver implementation is used.
+ *
+ * Transfers may give to or take from Unassigned (district 0, see UNASSIGNED in @zd/contracts).
+ * Unassigned is held to nothing: it has no target, may be left in any number of pieces, is not
+ * counted in `districtsTouched` and must not appear in `deviations`. Every real district is held
+ * to the usual rules, including a district that takes unassigned blocks: they must attach to it.
+ */
 export function verifySolution(
   graph: EngineGraph, assignment: Assignment, targets: PopTargets, solution: Solution,
   options: VerificationOptions = {},
@@ -33,7 +40,7 @@ export function verifySolution(
   for (const transfer of solution.transfers) {
     const { from, to, blocks, people } = transfer;
     if (!Number.isInteger(from) || !Number.isInteger(to) ||
-      from < 1 || to < 1 || from > numDistricts || to > numDistricts || from === to || !blocks.length) {
+      from < 0 || to < 0 || from > numDistricts || to > numDistricts || from === to || !blocks.length) {
       return fail('Invalid transfer endpoints or empty block list.');
     }
     let actual = 0, previous = -1;
@@ -52,8 +59,8 @@ export function verifySolution(
     const key = `${from}:${to}`;
     borders.set(key, (borders.get(key) ?? 0) + actual);
     total += actual;
-    touched.add(from);
-    touched.add(to);
+    if (from) touched.add(from);
+    if (to) touched.add(to);
   }
   if (solution.stats.people !== total || solution.stats.blocks !== blockCount ||
     solution.stats.populatedBlocks !== populatedCount || solution.stats.districtsTouched !== touched.size) {

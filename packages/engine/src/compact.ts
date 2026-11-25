@@ -33,6 +33,14 @@ function precinctMembers(graph: EngineGraph): Map<number, number[]> {
  * and stepping between two of them is free: depth is then counted in precincts, not blocks.
  * The precinct must still be reached like anything else, so a row of whole precincts cannot
  * run more than COMPACT_DEPTH deep either.
+ *
+ * Unassigned (district 0, see UNASSIGNED in @zd/contracts) is judged like any district here:
+ * giving to it, the bite must still be a compact one out of the district's edge facing it;
+ * taking from it, the moved blocks must still reach the district as for any recipient. The
+ * empty-pocket allowance never comes into play for an unassigned donor, since nothing it leaves
+ * behind is stranded and no pocket is ever added to such a transfer (see Model.separated and the
+ * pocket step of realize()); an empty pocket that still touches unassigned blocks is simply
+ * not part of a compact bite, as for any donor.
  */
 export function compactnessIssue(
   graph: EngineGraph, assignment: Assignment,

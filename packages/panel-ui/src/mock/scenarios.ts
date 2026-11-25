@@ -213,15 +213,15 @@ export function makeChosenNeighborOptions(districts: DistrictRow[], district: nu
     people, blocks, populatedBlocks: Math.max(1, blocks - 1), newPrecinctSplits: splits, healedPrecinctSplits: 0,
     newCountySplits: 0, perimeterDeltaM: -40 + blocks * 9, districtsTouched: touched, cost, steps,
   });
+  // Unassigned (0) has no deviation, so it never gets a deviation row.
+  const devRow = (nbr: number, after: number): DeviationChange[] =>
+    nbr === 0 ? [] : [{ district: nbr, before: devOf(nbr), after }];
   const cards: SolutionCard[] = withList.map((nbr, i) => ({
     id: `opt-${district}-to-${nbr}`,
     kind: 'single',
     stats: stats(4 + i * 3 + (nbr % 3), 2 + i + (nbr % 2), i === 0 ? 0 : 1, 2, 20 + i * 90),
     borderFlows: [flow(nbr, people)],
-    deviations: [
-      { district, before: row.deviation, after: 0 },
-      { district: nbr, before: devOf(nbr), after: devOf(nbr) + row.deviation },
-    ],
+    deviations: [{ district, before: row.deviation, after: 0 }, ...devRow(nbr, devOf(nbr) + row.deviation)],
   }));
   if (withList.length >= 2) {
     const [a, b] = withList;
@@ -234,8 +234,8 @@ export function makeChosenNeighborOptions(districts: DistrictRow[], district: nu
       borderFlows: [flow(a, first), flow(b, people - first)],
       deviations: [
         { district, before: row.deviation, after: 0 },
-        { district: a, before: devOf(a), after: devOf(a) + sign * first },
-        { district: b, before: devOf(b), after: devOf(b) + sign * (people - first) },
+        ...devRow(a, devOf(a) + sign * first),
+        ...devRow(b, devOf(b) + sign * (people - first)),
       ].sort((x, y) => x.district - y.district),
     });
   }
@@ -675,6 +675,127 @@ export function makeChainWalkthroughSteps(): WalkthroughStep[] {
   ];
 }
 
+/**
+ * A map still being drawn (Unassigned = district 0). Four districts; District 1 is +583 and its
+ * only real neighbor, District 2, is locked, so the rest of its border is unassigned blocks.
+ * District 4 is barely started. Deviations sum to −249,837: the people still unassigned.
+ */
+export const DRAWING_MAP_INFO: MapInfo = {
+  state: 'NV',
+  planName: 'NV Congressional (still drawing)',
+  numDistricts: 4,
+  popField: 'D20F',
+  totalPop: 3108000,
+  target: 777000,
+};
+
+const DRAWING_SPEC: Array<{ index: number; dev: number; neighbors: number[] }> = [
+  { index: 1, dev: 583, neighbors: [0, 2] },
+  { index: 2, dev: 0, neighbors: [0, 1, 3] },
+  { index: 3, dev: -420, neighbors: [0, 2, 4] },
+  { index: 4, dev: -250000, neighbors: [0, 3] },
+];
+
+export function makeDrawingDistricts(): DistrictRow[] {
+  return DRAWING_SPEC.map((spec) => ({
+    index: spec.index,
+    label: String(spec.index),
+    pop: DRAWING_MAP_INFO.target + spec.dev,
+    deviation: spec.dev,
+    color: DRA_COLORS[(spec.index - 1) % DRA_COLORS.length],
+    neighbors: [...spec.neighbors],
+  }));
+}
+
+/** People in unassigned blocks on the drawing map: everyone the four districts do not hold. */
+export const DRAWING_UNASSIGNED_POP =
+  DRAWING_MAP_INFO.totalPop - DRAWING_SPEC.reduce((sum, d) => sum + DRAWING_MAP_INFO.target + d.dev, 0);
+
+/** District 1 gives its 583 to Unassigned: two ways to erase them. */
+export const DRAWING_SINGLE_SOLUTIONS: SolutionCard[] = [
+  {
+    id: 'draw-opt-1',
+    kind: 'single',
+    stats: {
+      people: 583, blocks: 5, populatedBlocks: 4, newPrecinctSplits: 1, healedPrecinctSplits: 0,
+      newCountySplits: 0, perimeterDeltaM: -120, districtsTouched: 2, cost: 24, steps: 2,
+    },
+    borderFlows: [{ from: 1, to: 0, people: 583 }],
+    deviations: [{ district: 1, before: 583, after: 0 }],
+  },
+  {
+    id: 'draw-opt-2',
+    kind: 'single',
+    stats: {
+      people: 583, blocks: 9, populatedBlocks: 7, newPrecinctSplits: 0, healedPrecinctSplits: 0,
+      newCountySplits: 0, perimeterDeltaM: 40, districtsTouched: 2, cost: 61, steps: 3,
+    },
+    borderFlows: [{ from: 1, to: 0, people: 583 }],
+    deviations: [{ district: 1, before: 583, after: 0 }],
+  },
+];
+
+/** Districts 1 and 3 together: District 1 erases 583 people, District 3 paints in 420 unassigned people. */
+export const DRAWING_PLAN_SOLUTION: SolutionCard = {
+  id: 'draw-plan-1-3',
+  kind: 'fewest-splits',
+  stats: {
+    people: 1003, blocks: 9, populatedBlocks: 8, newPrecinctSplits: 1, healedPrecinctSplits: 0,
+    newCountySplits: 0, perimeterDeltaM: -60, districtsTouched: 3, cost: 70, steps: 3,
+  },
+  borderFlows: [
+    { from: 1, to: 0, people: 583 },
+    { from: 0, to: 3, people: 420 },
+  ],
+  deviations: [
+    { district: 1, before: 583, after: 0 },
+    { district: 3, before: -420, after: 0 },
+  ],
+};
+
+/** Erase a shattered precinct's blocks, erase a whole precinct, then paint unassigned blocks into District 3. */
+export function makeDrawingWalkthroughSteps(): WalkthroughStep[] {
+  return [
+    {
+      id: 'draw-step-1',
+      from: 1,
+      to: 0,
+      precinctId: '32003-0412',
+      wholePrecinct: false,
+      status: 'active',
+      blocks: [
+        { geoid: '320030412001001', number: 1, people: 160, done: false },
+        { geoid: '320030412001004', number: 2, people: 133, done: false },
+        { geoid: '320030412001007', number: 3, people: 90, done: false },
+      ],
+    },
+    {
+      id: 'draw-step-2',
+      from: 1,
+      to: 0,
+      precinctId: '32003-0415',
+      wholePrecinct: true,
+      status: 'pending',
+      blocks: [
+        { geoid: '320030415002001', number: 1, people: 120, done: false },
+        { geoid: '320030415002002', number: 2, people: 80, done: false },
+      ],
+    },
+    {
+      id: 'draw-step-3',
+      from: 0,
+      to: 3,
+      precinctId: '32031-0120',
+      wholePrecinct: false,
+      status: 'pending',
+      blocks: [
+        { geoid: '320310120003002', number: 1, people: 250, done: false },
+        { geoid: '320310120003005', number: 2, people: 170, done: false },
+      ],
+    },
+  ];
+}
+
 export type ScenarioId =
   | 'live-single'
   | 'live-single-give-to'
@@ -685,9 +806,12 @@ export type ScenarioId =
   | 'live-whole-map-26'
   | 'live-twoway-26'
   | 'live-csv-switch'
+  | 'live-drawing-unassigned'
+  | 'live-finished-unassigned-adjacent'
   | 'mini-map-options'
   | 'walkthrough-live'
   | 'walkthrough-twoway'
+  | 'walkthrough-unassigned'
   | 'walkthrough-awaiting-commit'
   | 'walkthrough-auto-paint'
   | 'walkthrough-auto-paint-twoway'
@@ -885,6 +1009,46 @@ export const SCENARIOS: Record<ScenarioId, ScenarioDefinition> = {
     }),
   },
 
+  'live-drawing-unassigned': {
+    id: 'live-drawing-unassigned',
+    category: 'Live & Scope',
+    label: 'Live: Map Being Drawn (Unassigned)',
+    description:
+      'District 1 (+583) touches only locked District 2 and unassigned blocks; "Any neighbor" gives to Unassigned while people are still unassigned.',
+    createState: () => ({
+      connection: 'live',
+      map: DRAWING_MAP_INFO,
+      districts: makeDrawingDistricts(),
+      unassigned: { pop: DRAWING_UNASSIGNED_POP },
+      scope: { mode: 'one', district: 1 },
+      lockedDistricts: [2],
+      solve: { status: 'done', elapsedMs: 22 },
+      solutions: DRAWING_SINGLE_SOLUTIONS,
+    }),
+  },
+
+  'live-finished-unassigned-adjacent': {
+    id: 'live-finished-unassigned-adjacent',
+    category: 'Live & Scope',
+    label: 'Live: Finished Map, Empty Unassigned Blocks',
+    description:
+      'Every person is assigned, but District 1 still touches unassigned blocks with nobody in them: Unassigned is offered, used only when picked.',
+    createState: () => {
+      // District 4 drawn: the map holds everyone, so the deviations sum to 0.
+      const districts = makeDrawingDistricts().map((d) =>
+        d.index === 4 ? { ...d, pop: DRAWING_MAP_INFO.target - 163, deviation: -163 } : d,
+      );
+      return {
+        connection: 'live',
+        map: DRAWING_MAP_INFO,
+        districts,
+        scope: { mode: 'one', district: 1 },
+        solve: { status: 'idle' },
+        solutions: [],
+      };
+    },
+  },
+
   'mini-map-options': {
     id: 'mini-map-options',
     category: 'Live & Scope',
@@ -948,6 +1112,33 @@ export const SCENARIOS: Record<ScenarioId, ScenarioDefinition> = {
       walkthrough: {
         solutionId: TWO_WAY_WALKTHROUGH_SOLUTION.id,
         steps: makeTwoWayWalkthroughSteps(),
+        current: 0,
+        strayEdits: [],
+        liveTicking: true,
+        mapMode: 'dra',
+      },
+    }),
+  },
+
+  'walkthrough-unassigned': {
+    id: 'walkthrough-unassigned',
+    category: 'Walkthrough',
+    label: 'Walkthrough: Erase To Unassigned',
+    description:
+      'Map being drawn: District 1 erases blocks (shattered, then a whole precinct) and District 3 paints in unassigned blocks.',
+    createState: () => ({
+      connection: 'live',
+      map: DRAWING_MAP_INFO,
+      districts: makeDrawingDistricts(),
+      unassigned: { pop: DRAWING_UNASSIGNED_POP },
+      scope: { mode: 'group', districts: [1, 3], allowOutsideAbsorb: true },
+      lockedDistricts: [2],
+      solve: { status: 'done', elapsedMs: 54 },
+      solutions: [DRAWING_PLAN_SOLUTION],
+      autoPaint: { available: true, enabled: true },
+      walkthrough: {
+        solutionId: DRAWING_PLAN_SOLUTION.id,
+        steps: makeDrawingWalkthroughSteps(),
         current: 0,
         strayEdits: [],
         liveTicking: true,

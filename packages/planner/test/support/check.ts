@@ -70,7 +70,8 @@ export function expectGoodPlan(
     expect(dv.before).toBe(before[dv.district] - targets.draTarget);
     expect(dv.after).toBe(after[dv.district] - targets.draTarget);
   }
-  const touched = new Set(sol.transfers.flatMap((t) => [t.from, t.to]));
+  // Unassigned (0) is not a district and is never counted as touched.
+  const touched = new Set(sol.transfers.flatMap((t) => [t.from, t.to]).filter((d) => d !== 0));
   expect(sol.stats.districtsTouched).toBe(touched.size);
   return final;
 }

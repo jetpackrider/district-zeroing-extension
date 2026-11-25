@@ -6,7 +6,10 @@ import {
   formatSigned,
   getDeviationTone,
   getSelectedDistrictIndexes,
+  isUnassigned,
   sortDistrictsWorstFirst,
+  UNASSIGNED_COLOR,
+  UNASSIGNED_NAME,
 } from '../format';
 
 interface DistrictPickerProps {
@@ -39,7 +42,8 @@ export function DistrictPicker({ state, dispatch, readOnly = false }: DistrictPi
     for (const row of districts) {
       if (!selectedSet.has(row.index) || !row.neighbors) continue;
       for (const nbr of row.neighbors) {
-        if (!selectedSet.has(nbr) && !lockedSet.has(nbr)) out.add(nbr);
+        // Unassigned (0) touches districts on a map being drawn, but it is never a group member.
+        if (!isUnassigned(nbr) && !selectedSet.has(nbr) && !lockedSet.has(nbr)) out.add(nbr);
       }
     }
     return [...out].sort((a, b) => a - b);
@@ -264,6 +268,24 @@ export function DistrictPicker({ state, dispatch, readOnly = false }: DistrictPi
               </div>
             );
           })}
+
+          {/* DRA's Unassigned row on a map still being drawn: shown for its population only. It
+              is not a district, has no deviation, and cannot be selected or locked. */}
+          {state.unassigned && (
+            <div
+              className={`zd-district-row zd-district-row--unassigned${showCheckboxes ? '' : ' zd-district-row--one'}`}
+              data-testid="unassigned-row"
+            >
+              {showCheckboxes && <span aria-hidden="true" />}
+              <span className="zd-district-row__name">
+                <span className="zd-swatch" style={{ backgroundColor: UNASSIGNED_COLOR }} aria-hidden="true" />
+                <span className="zd-district-row__label">{UNASSIGNED_NAME}</span>
+              </span>
+              <span className="zd-district-row__pop zd-num">{formatInt(state.unassigned.pop)}</span>
+              <span className="zd-district-row__na">no target</span>
+              <span aria-hidden="true" />
+            </div>
+          )}
         </div>
       )}
 
@@ -325,7 +347,7 @@ export function DistrictPicker({ state, dispatch, readOnly = false }: DistrictPi
                     and can&apos;t be zeroed on its own.
                   </p>
                   <div className="zd-feasibility__actions">
-                    {feasibility.suggestAdd.map((dIdx) => (
+                    {feasibility.suggestAdd.filter((dIdx) => !isUnassigned(dIdx)).map((dIdx) => (
                       <button
                         key={dIdx}
                         type="button"

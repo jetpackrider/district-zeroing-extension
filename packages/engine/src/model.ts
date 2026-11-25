@@ -24,9 +24,18 @@ function increment(counts: Map<number, number>, district: number, delta: number)
  * Fast region-to-district block count tracker.
  * Uses flat typed arrays for single-district regions (99% of precincts/counties)
  * and spills only split regions to a Map. Falls back to a Map when region IDs are sparse.
+ *
+ * Unassigned (district 0) is tracked too, so a region divided between a district and Unassigned
+ * can count as divided (see UNASSIGNED in @zd/contracts). Every caller says which view it wants
+ * (`districtCount(region, withUnassigned)`): a move between two real districts judges a region by
+ * its real districts only, exactly as before Unassigned was tracked, so unassigned blocks (even
+ * empty water left unassigned on a finished map) never change such a move's split counts. In the
+ * dense arrays an owner is stored as district + 1, so 0 can mean "no blocks" and -1 "split" (the
+ * per-district counts are then in `splits`).
  */
 export class RegionTracker {
   private readonly dense: boolean;
+  /** 0 = no blocks, -1 = split (see `splits`), otherwise the only district + 1. */
   private readonly owner: Int32Array;
   private readonly ownerCount: Uint32Array;
   private readonly splits: Membership = new Map();
@@ -56,13 +65,13 @@ export class RegionTracker {
       return;
     }
     const cur = this.owner[region];
-    if (cur === district) {
+    if (cur === district + 1) {
       this.ownerCount[region]++;
     } else if (cur === 0) {
-      this.owner[region] = district;
+      this.owner[region] = district + 1;
       this.ownerCount[region] = 1;
     } else if (cur > 0) {
-      this.splits.set(region, new Map([[cur, this.ownerCount[region]], [district, 1]]));
+      this.splits.set(region, new Map([[cur - 1, this.ownerCount[region]], [district, 1]]));
       this.owner[region] = -1;
       this.ownerCount[region] = 0;
     } else {
@@ -79,14 +88,14 @@ export class RegionTracker {
       return;
     }
     const cur = this.owner[region];
-    if (cur === district) {
+    if (cur === district + 1) {
       if (--this.ownerCount[region] === 0) this.owner[region] = 0;
     } else if (cur === -1) {
       const counts = this.splits.get(region)!;
       increment(counts, district, -1);
       if (counts.size === 1) {
         const [[onlyDistrict, onlyCount]] = counts;
-        this.owner[region] = onlyDistrict;
+        this.owner[region] = onlyDistrict + 1;
         this.ownerCount[region] = onlyCount;
         this.splits.delete(region);
       } else if (counts.size === 0) {
@@ -96,18 +105,26 @@ export class RegionTracker {
     }
   }
 
-  districtCount(region: number): number {
-    if (!this.dense) return this.sparse.get(region)?.size ?? 0;
+  /**
+   * How many holders the region has. With `withUnassigned`, Unassigned (0) counts as one more
+   * holder; without it only real districts count (a region all Unassigned then has 0).
+   */
+  districtCount(region: number, withUnassigned: boolean): number {
+    if (!this.dense) {
+      const counts = this.sparse.get(region);
+      return counts ? counts.size - Number(!withUnassigned && counts.has(0)) : 0;
+    }
     const cur = this.owner[region];
-    if (cur > 0) return 1;
+    if (cur > 0) return Number(withUnassigned || cur !== 1);
     if (cur === 0) return 0;
-    return this.splits.get(region)!.size;
+    const counts = this.splits.get(region)!;
+    return counts.size - Number(!withUnassigned && counts.has(0));
   }
 
   countOf(region: number, district: number): number {
     if (!this.dense) return this.sparse.get(region)?.get(district) ?? 0;
     const cur = this.owner[region];
-    if (cur === district) return this.ownerCount[region];
+    if (cur === district + 1) return this.ownerCount[region];
     if (cur >= 0) return 0;
     return this.splits.get(region)!.get(district) ?? 0;
   }
@@ -115,13 +132,18 @@ export class RegionTracker {
   hasDistrict(region: number, district: number): boolean {
     if (!this.dense) return this.sparse.get(region)?.has(district) ?? false;
     const cur = this.owner[region];
-    if (cur === district) return true;
+    if (cur === district + 1) return true;
     if (cur >= 0) return false;
     return this.splits.get(region)!.has(district);
   }
 
+  /**
+   * Change in "is split" (−1, 0 or +1) when `size` blocks of the region move from `from` to `to`.
+   * A move between two real districts looks at real districts only; a move with Unassigned on one
+   * side counts it as a holder (see splitChange for the exact rule used in final stats).
+   */
   delta(region: number, from: number, to: number, size: number): number {
-    const before = this.districtCount(region);
+    const before = this.districtCount(region, from === 0 || to === 0);
     const after = before - Number(this.countOf(region, from) === size) + Number(!this.hasDistrict(region, to));
     return Number(after > 1) - Number(before > 1);
   }
@@ -129,7 +151,7 @@ export class RegionTracker {
   cloneCounts(region: number): Map<number, number> {
     if (!this.dense) return new Map(this.sparse.get(region));
     const cur = this.owner[region];
-    if (cur > 0) return new Map([[cur, this.ownerCount[region]]]);
+    if (cur > 0) return new Map([[cur - 1, this.ownerCount[region]]]);
     if (cur === -1) return new Map(this.splits.get(region)!);
     return new Map();
   }
@@ -305,26 +327,23 @@ export class GraphState {
         negativePopulation[oldD] += p;
         negativePopulation[newD] -= p;
       }
-      if (oldD) {
-        precinctTracker.remove(precinctOf[b], oldD);
-        countyTracker.remove(countyOf[b], oldD);
-        if (town) townTracker!.remove(town, oldD);
-        touchedDistricts.add(oldD);
-        let list = removed.get(oldD);
-        if (!list) removed.set(oldD, list = []);
-        list.push(b);
-      }
-      if (newD) {
-        precinctTracker.add(precinctOf[b], newD);
-        countyTracker.add(countyOf[b], newD);
-        if (town) townTracker!.add(town, newD);
-        touchedDistricts.add(newD);
-        let list = added.get(newD);
-        if (!list) added.set(newD, list = []);
-        list.push(b);
-      } else if (this.cutChildren.has(b)) {
-        this.cutChildren.delete(b);
-      }
+      // Unassigned (0) is tracked like a district: its block list feeds a border with it and
+      // the region trackers count a region it shares with a district as divided.
+      precinctTracker.remove(precinctOf[b], oldD);
+      countyTracker.remove(countyOf[b], oldD);
+      if (town) townTracker!.remove(town, oldD);
+      touchedDistricts.add(oldD);
+      let removedList = removed.get(oldD);
+      if (!removedList) removed.set(oldD, removedList = []);
+      removedList.push(b);
+      precinctTracker.add(precinctOf[b], newD);
+      countyTracker.add(countyOf[b], newD);
+      if (town) townTracker!.add(town, newD);
+      touchedDistricts.add(newD);
+      let addedList = added.get(newD);
+      if (!addedList) added.set(newD, addedList = []);
+      addedList.push(b);
+      if (!newD && this.cutChildren.has(b)) this.cutChildren.delete(b);
     }
 
     for (const d of touchedDistricts) {
@@ -379,7 +398,6 @@ export class GraphState {
       const p = pop[b];
       districtPop[d] += p;
       if (hasNegativePop && p < 0) negativePopulation[d] -= p;
-      if (!d) continue;
       if (countScratch[d] === 0) activeDistricts.push(d);
       countScratch[d]++;
       precinctTracker.add(precinctOf[b], d);
@@ -395,7 +413,6 @@ export class GraphState {
     }
     for (let b = 0; b < n; b++) {
       const d = assignment[b];
-      if (!d) continue;
       const pos = writePos.get(d)!;
       this.blocksOfDistrict.get(d)![pos] = b;
       writePos.set(d, pos + 1);
@@ -404,8 +421,19 @@ export class GraphState {
   }
 
   ensureDistrict(d: number) {
-    if (!d || this.tarjanValid[d]) return;
+    if (this.tarjanValid[d]) return;
     const blocks = this.blocksOfDistrict.get(d);
+    if (!d) {
+      // Unassigned is never held together (see UNASSIGNED in @zd/contracts): none of its blocks
+      // is a cut vertex, each is its own component, and taking any of them strands nothing.
+      if (blocks) for (let i = 0; i < blocks.length; i++) {
+        this.articulation[blocks[i]] = 0;
+        this.component[blocks[i]] = blocks[i];
+        this.cutChildren.delete(blocks[i]);
+      }
+      this.tarjanValid[0] = 1;
+      return;
+    }
     if (!blocks || !blocks.length) {
       this.tarjanValid[d] = 1;
       return;
@@ -562,10 +590,11 @@ export class Model {
     const towns: Membership = new Map();
     for (const transfer of transfers) for (const block of transfer.blocks) {
       const town = townOf[block];
-      if (town && tracker.districtCount(town) === 1) updateRegion(towns, tracker, town, transfer);
+      // A town already divided between real districts can never be newly split (splitChange).
+      if (town && tracker.districtCount(town, false) <= 1) updateRegion(towns, tracker, town, transfer);
     }
     let splits = 0;
-    for (const counts of towns.values()) if (counts.size > 1) splits++;
+    for (const [town, counts] of towns) splits += Number(splitChange(tracker.cloneCounts(town), counts).newSplit);
     return splits;
   }
 
@@ -592,6 +621,8 @@ export class Model {
   /** Blocks to take with an articulation seed, or undefined if it would strand a substantial piece. */
   fringe(seed: number, locked?: Uint8Array): number[] | undefined {
     const d = this.assignment[seed];
+    // Unassigned may be left in any number of pieces: taking a block of it strands nothing.
+    if (!d) return [];
     this.state.ensureDistrict(d);
     if (!this.articulation[seed]) return [];
     const { entry, end, subtreePopulationMass, cutChildren } = this.state;
@@ -645,6 +676,7 @@ export class Model {
     const { precinctTracker, countyTracker } = this.state;
     const precincts: Membership = new Map();
     const counties: Membership = new Map();
+    // Districts only: Unassigned (0) is not a district (see UNASSIGNED in @zd/contracts).
     const districts = new Set<number>();
     let people = 0;
     let blocks = 0;
@@ -653,8 +685,8 @@ export class Model {
     let perimeterDeltaM = 0;
     for (const transfer of transfers) {
       people += transfer.people;
-      districts.add(transfer.from);
-      districts.add(transfer.to);
+      if (transfer.from) districts.add(transfer.from);
+      if (transfer.to) districts.add(transfer.to);
       const transferPrecincts = new Set<number>();
       for (const block of transfer.blocks) {
         blocks++;
@@ -665,11 +697,11 @@ export class Model {
         for (let edge = graph.adjOffsets[block]; edge < graph.adjOffsets[block + 1]; edge++) {
           const next = graph.adjTargets[edge];
           if (after[next] !== assignment[next] && next < block) continue;
-          const beforeSides = assignment[next] === 0 ? 1 : 2;
-          const afterSides = after[next] === 0 ? 1 : 2;
+          // An edge between two districts is on both perimeters; one facing Unassigned (0) is on
+          // the district's only, so it counts once (and a block of Unassigned has no perimeter).
           perimeterDeltaM += graph.adjLen[edge] * (
-            Number(after[next] !== after[block]) * afterSides -
-            Number(assignment[next] !== assignment[block]) * beforeSides
+            Number(after[next] !== after[block]) * sides(after[next], after[block]) -
+            Number(assignment[next] !== assignment[block]) * sides(assignment[next], assignment[block])
           );
         }
       }
@@ -679,12 +711,12 @@ export class Model {
     let healedPrecinctSplits = 0;
     let newCountySplits = 0;
     for (const [key, counts] of precincts) {
-      const before = precinctTracker.districtCount(key);
-      newPrecinctSplits += Number(before === 1 && counts.size > 1);
-      healedPrecinctSplits += Number(before > 1 && counts.size === 1);
+      const change = splitChange(precinctTracker.cloneCounts(key), counts);
+      newPrecinctSplits += Number(change.newSplit);
+      healedPrecinctSplits += Number(change.healed);
     }
     for (const [key, counts] of counties) {
-      newCountySplits += Math.max(0, counts.size - countyTracker.districtCount(key));
+      newCountySplits += splitChange(countyTracker.cloneCounts(key), counts).added;
     }
     const newTownSplits = this.newTownSplits(transfers);
     const cost = newPrecinctSplits * weights.newPrecinctSplit +
@@ -705,6 +737,8 @@ export class Model {
     const boundaries = new Map<number, Set<number>>();
     for (const block of moved) {
       const from = assignment[block];
+      // Unassigned may be left in any number of pieces (see UNASSIGNED in @zd/contracts).
+      if (!from) continue;
       this.state.ensureDistrict(from);
       for (let edge = g.adjOffsets[block]; edge < g.adjOffsets[block + 1]; edge++) {
         const next = g.adjTargets[edge];
@@ -749,6 +783,38 @@ export class Model {
 }
 
 const emptyBlocks = new Uint32Array(0);
+
+/**
+ * How many perimeters a border between districts `a` and `b` lies on: 2 between two districts,
+ * 1 between a district and Unassigned (0), whose own perimeter is not counted.
+ */
+export const sides = (a: number, b: number) => Number(a !== 0) + Number(b !== 0);
+
+/**
+ * How a region's division changed, from its holders before and after (district -> blocks; 0 is
+ * Unassigned). A region is judged twice, by its real districts alone and with Unassigned counted
+ * as one more holder (see UNASSIGNED in @zd/contracts), and a change in either view counts:
+ *  - newSplit: one holder or none before and several after, in either view. So giving part of a
+ *    whole precinct to Unassigned splits it, and so does dividing a town between two real
+ *    districts when it already had some unassigned (say, empty water) blocks.
+ *  - healed: several holders before and one or none after, with Unassigned counted; or the same
+ *    in the real view while Unassigned stays in or out of the region (erasing a district's part
+ *    of a split precinct leaves it divided with Unassigned, so that is not a heal).
+ *  - added: holders added, the larger increase of the two views (for county splits).
+ * When Unassigned's presence in the region does not change (every move between two real
+ * districts), the real view decides alone and this is exactly the rule from before Unassigned
+ * was tracked. `planner/src/stats.ts` applies the same rule to whole plans.
+ */
+export function splitChange(before: ReadonlyMap<number, number>, after: ReadonlyMap<number, number>) {
+  const allBefore = before.size, allAfter = after.size;
+  const zeroBefore = before.has(0), zeroAfter = after.has(0);
+  const realBefore = allBefore - Number(zeroBefore), realAfter = allAfter - Number(zeroAfter);
+  return {
+    newSplit: (allBefore <= 1 && allAfter > 1) || (realBefore <= 1 && realAfter > 1),
+    healed: (allBefore > 1 && allAfter <= 1) || (zeroBefore === zeroAfter && realBefore > 1 && realAfter <= 1),
+    added: Math.max(0, allAfter - allBefore, realAfter - realBefore),
+  };
+}
 
 function updateRegion(changed: Membership, tracker: RegionTracker, key: number, transfer: Pick<Transfer, 'from' | 'to'>) {
   let counts = changed.get(key);

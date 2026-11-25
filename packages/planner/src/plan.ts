@@ -389,6 +389,8 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
 
     const inGroup = new Set(members);
     const absorbers = new Map<number, number>();
+    /** Absorbers with no target: Unassigned (0) when the request allows it. */
+    const free = new Set<number>();
     const borders: Array<[number, number]> = [];
     for (const [a, b] of pairs) borders.push([a, b], [b, a]);
     if (req.allowOutsideAbsorb) {
@@ -400,6 +402,18 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
           absorbers.set(o, pops[o] - targets.q);
           outsidePairs.push(d < o ? [d, o] : [o, d]);
           borders.push([d, o], [o, d]);
+        }
+      }
+      // Unassigned (see UNASSIGNED in @zd/contracts): a border with 0 for every member that
+      // touches unassigned blocks. Its side has no target, no tolerance and no contiguity, so
+      // it is a free absorber in the flow; the solver holds the member's side to every rule.
+      if (analysis.unassignedAllowed) {
+        for (const d of members) {
+          if (!analysis.unassignedContact[d]) continue;
+          absorbers.set(0, 0);
+          free.add(0);
+          outsidePairs.push([0, d]);
+          borders.push([d, 0], [0, d]);
         }
       }
       collectCurves(curveReq, outsidePairs, curves);
@@ -449,6 +463,11 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
     for (const d of members) selected[d] = 1;
     const absorber = new Uint8Array(k + 1);
     for (const o of absorbers.keys()) absorber[o] = 1;
+    // Residual repair searches neighbors by adjacency, which never lists Unassigned; add 0
+    // (last, so real neighbors come first) where a member may trade with it.
+    const repairAdjacency = free.has(0)
+      ? adjacency.map((list, d) => (inGroup.has(d) && analysis.unassignedContact[d] ? [...list, 0] : list))
+      : adjacency;
     const planKind = (kind: PlanKind, firstCurves = curves, allowLongReach = false): { solution: Solution } | { failure: PlanFailure } => {
       const activeSolver = allowLongReach ? solver.lastResort! : solver;
       const runCtx: Ctx = allowLongReach ? { ...ctx, req: { ...req, solver: activeSolver }, allowLongReach } : ctx;
@@ -465,7 +484,7 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
         const roundSupply = new Map<number, number>();
         for (const d of members) roundSupply.set(d, roundPops[d] - targets.q);
         const roundAbsorbers = new Map<number, number>();
-        for (const o of absorbers.keys()) roundAbsorbers.set(o, roundPops[o] - targets.q);
+        for (const o of absorbers.keys()) roundAbsorbers.set(o, free.has(o) ? 0 : roundPops[o] - targets.q);
         const roundCurves: CurveMap = round === 0 ? firstCurves : refreshCurves(activeSolver, prevCurves!, prevUsed, cur, curLock);
         prevCurves = roundCurves;
         const caps = new Map<number, number>();
@@ -483,7 +502,7 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
         let lastStuck: RepairStuck | undefined;
         let repairFailures = 0;
         for (let attempt = 0; attempt <= retryThrough && !success; attempt++) {
-          const flow = planFlow({ members, supply: roundSupply, hi, borders, curves: roundCurves, absorbers: roundAbsorbers, caps, params, slackCost: SLACK_COST });
+          const flow = planFlow({ members, supply: roundSupply, hi, borders, curves: roundCurves, absorbers: roundAbsorbers, free, caps, params, slackCost: SLACK_COST });
           lastBorders = flow.borders;
           lastUnmetFlow = flow.unmet;
           // The curve can miss a small amount entirely. Repair may still place it
@@ -522,12 +541,13 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
                 hi,
                 selected,
                 absorber,
-                adjacency,
+                adjacency: repairAdjacency,
                 memo: repairMemo,
                 memoPrefix: `${allowLongReach}|${JSON.stringify(weights)}`,
                 version: (d) => ver.get(d) ?? '',
                 onDebug: options.onRepairDebug,
                 avoidBorder,
+                crossed: new Set([...steps, ...out.steps].map((st) => pairKey(st.from, st.to))),
                 onCommit: (t) => {
                   bump(t);
                   ctx.progress(0, 1);
@@ -551,6 +571,7 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
               districts: members,
               allowOutsideAbsorb: req.allowOutsideAbsorb,
               absorbers: req.absorbers,
+              includeUnassigned: req.includeUnassigned,
               transfers: [...steps, ...roundSteps].map((st) => st.transfer),
               locked: req.locked,
             });
@@ -667,9 +688,9 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
       const detail = !f
         ? 'No plan found.'
         : stuck
-          ? `District ${stuck.district} is still ${Math.abs(stuck.violation).toLocaleString('en-US')} ${stuck.violation > 0 ? 'over' : 'under'}: no combination of deliverable transfers with Districts ${stuck.neighbors.join(', ')} (one-way, two-way, chains or cycles) places it.`
+          ? `District ${stuck.district} is still ${Math.abs(stuck.violation).toLocaleString('en-US')} ${stuck.violation > 0 ? 'over' : 'under'}: no combination of deliverable transfers with ${partnerNames(stuck.neighbors)} (one-way, two-way, chains or cycles) places it.`
           : f.reason === 'retries-exhausted' && f.borders.length
-          ? `Could not realize ${f.borders.map((b) => `${b.from} → ${b.to}: ${b.people}`).join(', ')}.`
+          ? `Could not realize ${f.borders.map((b) => `${shortName(b.from)} → ${shortName(b.to)}: ${b.people}`).join(', ')}.`
           : `The borders between these districts cannot carry enough people (${f.unmet.toLocaleString('en-US')} left over).`;
       return { status: 'needs-precinct-rework', solutions: [], message: `${detail} Needs precinct-level rework.`, elapsedMs: now() - t0, failures, repairCalls, ...base };
     }
@@ -680,4 +701,20 @@ export function planGroup(req: GroupSolveRequest, options: PlanOptions = {}): Pl
   } catch (err) {
     return fail('error', `Planner error: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/**
+ * Names in user-facing messages. Unassigned (0) is never "District 0" (see UNASSIGNED in
+ * @zd/contracts): "with District 3 and Unassigned", "with Districts 3, 4", "with Unassigned".
+ */
+function partnerNames(districts: readonly number[]): string {
+  const real = districts.filter((d) => d !== 0);
+  const names = real.length ? [`${real.length > 1 ? 'Districts' : 'District'} ${real.join(', ')}`] : [];
+  if (districts.includes(0)) names.push('Unassigned');
+  return names.length ? names.join(' and ') : 'any neighbor';
+}
+
+/** A district number as the border list shows it, with Unassigned (0) named. */
+function shortName(d: number): string {
+  return d === 0 ? 'Unassigned' : String(d);
 }

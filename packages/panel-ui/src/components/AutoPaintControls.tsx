@@ -1,10 +1,10 @@
 import type { PanelAction, PanelState, WalkthroughStep } from '@zd/contracts';
-import { formatInt } from '../format';
+import { formatInt, isUnassigned } from '../format';
 
 interface AutoPaintControlsProps {
   autoPaint: NonNullable<PanelState['autoPaint']>;
   step: WalkthroughStep;
-  /** Name of the receiving district, e.g. "District 12". */
+  /** Name of the receiving district, e.g. "District 12" ("Unassigned" for a step that erases). */
   toName: string;
   /**
    * Set when this step should not be painted yet even though painting is on, e.g. Leg 2 of a
@@ -29,6 +29,9 @@ export function AutoPaintControls({ autoPaint, step, toName, blockedReason, disp
   const people = step.blocks.reduce((s, b) => s + b.people, 0);
   const awaitingCommit = step.status === 'awaiting-commit';
   const done = step.status === 'done';
+  // A step into Unassigned (district 0) erases: DRA paints the blocks with its Eraser's value, 0.
+  const erasing = isUnassigned(step.to);
+  const blocksText = `${step.blocks.length} highlighted ${step.blocks.length === 1 ? 'block' : 'blocks'}`;
   const disabledWhy = busy
     ? undefined
     : awaitingCommit
@@ -47,14 +50,18 @@ export function AutoPaintControls({ autoPaint, step, toName, blockedReason, disp
             aria-busy={busy ? true : undefined}
             onClick={() => dispatch({ type: 'walkthrough-paint-step' })}
           >
-            {busy ? 'Painting…' : 'Paint this step'}
+            {busy ? (erasing ? 'Erasing…' : 'Painting…') : erasing ? 'Erase this step' : 'Paint this step'}
           </button>
           <span className="zd-autopaint__what" data-testid="paint-step-what">
             {busy
-              ? 'DRA is painting this step; the extension then re-reads the plan to check it.'
-              : step.wholePrecinct
-                ? `Moves the whole precinct ${step.precinctId} (${formatInt(people)} people) into ${toName}.`
-                : `Moves the ${step.blocks.length} highlighted ${step.blocks.length === 1 ? 'block' : 'blocks'} (${formatInt(people)} people) into ${toName}; no shattering or checkmark needed.`}
+              ? `DRA is ${erasing ? 'erasing' : 'painting'} this step; the extension then re-reads the plan to check it.`
+              : erasing
+                ? step.wholePrecinct
+                  ? `Erases the whole precinct ${step.precinctId} (${formatInt(people)} people), leaving it unassigned.`
+                  : `Erases the ${blocksText} (${formatInt(people)} people), leaving them unassigned; no shattering or checkmark needed.`
+                : step.wholePrecinct
+                  ? `Moves the whole precinct ${step.precinctId} (${formatInt(people)} people) into ${toName}.`
+                  : `Moves the ${blocksText} (${formatInt(people)} people) into ${toName}; no shattering or checkmark needed.`}
           </span>
           {disabledWhy && (
             <span className="zd-autopaint__note" data-testid="paint-step-blocked">

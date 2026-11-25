@@ -42,6 +42,12 @@ export interface FlowModelInput {
   curves: CurveMap;
   /** Outside districts allowed to absorb, with their pop - q. */
   absorbers: Map<number, number>;
+  /**
+   * Absorbers with no target (Unassigned, district 0; see UNASSIGNED in @zd/contracts): they
+   * take or give any number of people at a flat cost, with no deviation penalty either way.
+   * Each must also be a key of `absorbers` (its value there is ignored).
+   */
+  free?: ReadonlySet<number>;
   /** Upper bounds on people per directed border (from re-planning), keyed by pairKey. */
   caps: Map<number, number>;
   params: FlowCostParams;
@@ -80,6 +86,17 @@ export function absorbTiers(d: number, hi: number, big: number, eps: number, pen
   }
   tiers.push({ cap: big, cost: eps + penalty });
   return tiers;
+}
+
+/**
+ * Tiers for an absorber with no target (Unassigned): unlimited either way at one cost. Its
+ * deviation effect is zero, so it sits between the real absorber's tiers (absorbTiers): dearer
+ * than moving a real neighbor toward zero (`eps`), so a real neighbor that the move helps is
+ * used first even across a somewhat dearer border; cheaper than overshooting a real neighbor
+ * (`eps + penalty / 2`) or pushing it from zero (`eps + penalty`).
+ */
+export function freeAbsorbTiers(big: number, eps: number, penalty: number): Array<{ cap: number; cost: number }> {
+  return [{ cap: big, cost: eps + Math.floor(penalty / 4) }];
 }
 
 export function planFlow(input: FlowModelInput): FlowPlan {
@@ -139,6 +156,17 @@ export function planFlow(input: FlowModelInput): FlowPlan {
     }
   }
   for (const o of absorbers) {
+    if (input.free?.has(o)) {
+      // Unassigned: take (in) or give (out) any amount. Both arcs cost the same and are
+      // positive, so the flow never uses both for one district (a pointless two-way trade).
+      for (const t of freeAbsorbTiers(big, params.hop, params.absorbPenalty)) {
+        arcs.push({ from: inNode.get(o)!, to: T, cap: t.cap, cost: t.cost });
+        meta.push({ type: 'absorb' });
+        arcs.push({ from: T, to: outNode.get(o)!, cap: t.cap, cost: t.cost });
+        meta.push({ type: 'absorb' });
+      }
+      continue;
+    }
     const d = input.absorbers.get(o)!;
     for (const t of absorbTiers(d, hi, big, params.hop, params.absorbPenalty)) {
       arcs.push({ from: inNode.get(o)!, to: T, cap: t.cap, cost: t.cost });

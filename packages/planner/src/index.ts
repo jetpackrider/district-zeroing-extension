@@ -3,8 +3,8 @@ export { repairResiduals, REPAIR_MAX_DEPTH, REPAIR_BEAM, REPAIR_SWAP_ROOM, REPAI
 export { checkGroupFeasibility, analyzeGroup, populationExcess, extraSlot, type GroupAnalysis, type GroupComponent, type FeasibilityRequest } from './feasibility';
 export { buildInteractionGraph, collectCurves, interactionFromCurves, internalPairs, cleanTiers, CurveCache, type CurveMap, type InteractionRequest } from './interaction';
 export { minCostFlow, type FlowArc, type FlowResult } from './mcf';
-export { planFlow, absorbTiers, FLOW_PARAMS, type FlowModelInput, type FlowPlan, type BorderFlow, type FlowCostParams } from './flowModel';
+export { planFlow, absorbTiers, freeAbsorbTiers, FLOW_PARAMS, type FlowModelInput, type FlowPlan, type BorderFlow, type FlowCostParams } from './flowModel';
 export { verifyPlan, type PlanCheckInput, type PlanCheckResult, type PlanIssue, type PlanIssueKind } from './verify';
 export { planMetrics } from './stats';
-export { districtPopulations, districtAdjacency } from './districts';
+export { districtPopulations, districtAdjacency, unassignedContact, unassignedPermitted } from './districts';
 export { DEFAULT_WEIGHTS, resolveWeights } from './weights';

@@ -17,6 +17,7 @@ import {
   getDistrictColor,
   getSelectedDistrictIndexes,
   isDeviationZeroed,
+  isUnassigned,
 } from '../format';
 import { AutoPaintControls } from './AutoPaintControls';
 import { MiniMapSlot } from './MiniMapSlot';
@@ -98,6 +99,12 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
   const fromName = activeStep ? formatDistrictName(activeStep.from, state.districts) : '';
   const fromColor = activeStep ? getDistrictColor(activeStep.from, state.districts) : undefined;
   const toColor = activeStep ? getDistrictColor(activeStep.to, state.districts) : undefined;
+
+  // A step into Unassigned (district 0) is erasing: DRA's Eraser paints blocks back to unassigned.
+  // A step out of it paints unassigned blocks into the district, like any other step.
+  const erasing = activeStep ? isUnassigned(activeStep.to) : false;
+  const fromUnassigned = activeStep ? isUnassigned(activeStep.from) : false;
+  const blockWord = (n: number) => (n === 1 ? 'block' : 'blocks');
 
   const isLastStep = clampedIndex >= steps.length - 1;
 
@@ -381,7 +388,7 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
           <MiniMapSlot
             renderMiniMap={renderMiniMap}
             placeholderTitle="Mini-map fallback active"
-            placeholderText={`Locate precinct ${activeStep?.precinctId ?? '—'} in DRA and paint the numbered blocks.`}
+            placeholderText={`Locate precinct ${activeStep?.precinctId ?? '—'} in DRA and ${erasing ? 'erase' : 'paint'} the numbered blocks.`}
           />
         )}
 
@@ -468,11 +475,30 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
             </div>
 
             <p className="zd-step-instruction" data-testid="step-instruction">
-              {activeStep.wholePrecinct ? (
+              {erasing ? (
+                activeStep.wholePrecinct ? (
+                  <>
+                    Step {clampedIndex + 1} of {steps.length}: with <strong>Precinct paint</strong> on,
+                    use the <strong>Eraser</strong> to erase the whole outlined precinct (
+                    <span className="zd-mono">{activeStep.precinctId}</span>). Its{' '}
+                    {formatInt(activeStepTotalPeople)} people become unassigned; no shattering needed.
+                  </>
+                ) : (
+                  <>
+                    Step {clampedIndex + 1} of {steps.length}: with <strong>Block paint</strong> on,
+                    click the outlined precinct to shatter it, then with the <strong>Eraser</strong>{' '}
+                    erase the{' '}
+                    <strong>
+                      {activeStep.blocks.length} highlighted {blockWord(activeStep.blocks.length)}
+                    </strong>
+                    . {activeStep.blocks.length === 1 ? 'It becomes' : 'They become'} unassigned.
+                  </>
+                )
+              ) : activeStep.wholePrecinct ? (
                 <>
                   Step {clampedIndex + 1} of {steps.length}: with <strong>Precinct paint</strong> on,
-                  paint the entire outlined precinct (<span className="zd-mono">{activeStep.precinctId}</span>)
-                  into <strong>{toName}</strong> ({formatInt(activeStepTotalPeople)} people — no
+                  paint the entire outlined{fromUnassigned ? ' unassigned' : ''} precinct (
+                  <span className="zd-mono">{activeStep.precinctId}</span>) into <strong>{toName}</strong> ({formatInt(activeStepTotalPeople)} people — no
                   shattering needed).
                 </>
               ) : (
@@ -480,8 +506,8 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
                   Step {clampedIndex + 1} of {steps.length}: with <strong>Block paint</strong> on,
                   click the outlined precinct to shatter it, then paint the{' '}
                   <strong>
-                    {activeStep.blocks.length} highlighted{' '}
-                    {activeStep.blocks.length === 1 ? 'block' : 'blocks'}
+                    {activeStep.blocks.length} highlighted{fromUnassigned ? ' unassigned' : ''}{' '}
+                    {blockWord(activeStep.blocks.length)}
                   </strong>{' '}
                   into <strong>{toName}</strong>.
                 </>
@@ -513,7 +539,7 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
               <div>
                 <div className="zd-section-head" style={{ marginBottom: 5 }}>
                   <span className="zd-section-title">
-                    {activeStep.wholePrecinct ? 'Precinct blocks' : 'Blocks to paint'}
+                    {activeStep.wholePrecinct ? 'Precinct blocks' : erasing ? 'Blocks to erase' : 'Blocks to paint'}
                   </span>
                   <span className="zd-num" style={{ fontSize: 11.5, color: 'var(--zd-text-muted)' }}>
                     {activeStepDoneBlocks}/{activeStep.blocks.length} done ·{' '}
@@ -538,7 +564,7 @@ export function WalkthroughView({ state, dispatch, renderMiniMap }: WalkthroughV
                       </span>
                       <span className="zd-block-right">
                         <span>{formatInt(block.people)} pop</span>
-                        <span className="zd-block-status">{block.done ? 'Done' : 'To paint'}</span>
+                        <span className="zd-block-status">{block.done ? 'Done' : erasing ? 'To erase' : 'To paint'}</span>
                       </span>
                     </li>
                   ))}

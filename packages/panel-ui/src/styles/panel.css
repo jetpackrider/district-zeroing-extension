@@ -2038,6 +2038,41 @@
   color: var(--zd-warn);
 }
 
+/* Unassigned (district 0): a plain explanation, not a warning. */
+.zd-chooser__note--info {
+  color: var(--zd-text-muted);
+}
+
+.zd-chooser__pop-label {
+  font-size: 10.5px;
+  color: var(--zd-text-muted);
+}
+
+/* A card that leaves people unassigned, or takes them from unassigned blocks. */
+.zd-solution-card__unassigned {
+  font-size: 11.5px;
+  line-height: 1.35;
+  padding: 4px 7px;
+  border-radius: 6px;
+  color: var(--zd-text-secondary);
+  background: var(--zd-surface-subtle);
+  border: 1px solid var(--zd-border);
+}
+
+/* DRA's Unassigned row in the district list: read-only, never locked or selected. */
+.zd-district-row--unassigned,
+.zd-district-row--unassigned:hover {
+  cursor: default;
+  background: var(--zd-surface-subtle);
+  color: var(--zd-text-secondary);
+}
+
+.zd-district-row__na {
+  text-align: right;
+  font-size: 11px;
+  color: var(--zd-text-muted);
+}
+
 .zd-solution-card__cta-steps {
   font-weight: 500;
   color: var(--zd-text-muted);

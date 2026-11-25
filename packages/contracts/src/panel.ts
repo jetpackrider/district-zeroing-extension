@@ -20,7 +20,10 @@ export interface DistrictRow {
   deviation: number;
   /** DRA's district color as a CSS color, when known. */
   color?: string;
-  /** Adjacent district indexes, when the bundle is loaded. */
+  /**
+   * Adjacent district indexes, when the bundle is loaded. Includes 0 when the district touches
+   * unassigned blocks (Unassigned, see PanelState.unassigned).
+   */
   neighbors?: number[];
 }
 
@@ -29,6 +32,9 @@ export type Scope =
    * One district. `with` is the user's choice of which neighbors trade with it: an over
    * district gives to them, an under district takes from them. Absent or empty = any neighbor.
    * A neighbor the user picked may end further from zero than it started; that is their call.
+   * `with` may contain 0 (Unassigned): give blocks to it, or take unassigned blocks.
+   * "Any neighbor" includes Unassigned only while it holds people (PanelState.unassigned.pop > 0,
+   * a map still being drawn); on a finished map it is used only when picked.
    */
   | { mode: 'one'; district: number; with?: number[] }
   | { mode: 'group'; districts: number[]; allowOutsideAbsorb: boolean }
@@ -126,6 +132,11 @@ export interface PanelState {
   /** All districts, in DRA order. The panel sorts for display. */
   districts: DistrictRow[];
   scope: Scope;
+  /**
+   * Unassigned (district 0): DRA's Unassigned row. Absent when no block is unassigned. Not a
+   * district: it has no deviation, is never listed in `districts`, and cannot be locked.
+   */
+  unassigned?: { pop: number };
   /** Present for group scope once the bundle is loaded. */
   feasibility?: GroupFeasibility;
   /** Present for group / all scope after the capacity pass. */
@@ -156,7 +167,7 @@ export interface PanelState {
   /**
    * Districts the user locked (finished ones, usually). No suggestion moves a block into or out
    * of a locked district: it is never a neighbor that absorbs, and group and whole-map plans leave
-   * it out. Remembered per map. Absent = none.
+   * it out. Remembered per map. Absent = none. Never contains 0 (Unassigned).
    */
   lockedDistricts?: number[];
 }

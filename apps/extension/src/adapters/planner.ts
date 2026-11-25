@@ -10,7 +10,7 @@ export function planGroup(req: GroupSolveRequest, curveCache?: CurveCache): Grou
   return realPlanGroup(req, { curveCache });
 }
 
-export function groupFeasibility(req: { graph: EngineGraph; assignment: Assignment; targets: PopTargets; districts: number[]; allowOutsideAbsorb?: boolean; absorbers?: number[] }): GroupFeasibility {
+export function groupFeasibility(req: { graph: EngineGraph; assignment: Assignment; targets: PopTargets; districts: number[]; allowOutsideAbsorb?: boolean; absorbers?: number[]; includeUnassigned?: boolean }): GroupFeasibility {
   return checkGroupFeasibility(req);
 }
 

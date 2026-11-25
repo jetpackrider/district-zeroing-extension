@@ -35,6 +35,27 @@ export interface EngineGraph {
 /** District index per block. 0 = unassigned; districts are 1..numDistricts. Never mutated by the engine. */
 export type Assignment = Uint16Array;
 
+/**
+ * Unassigned (district 0) as a trading partner, for maps still being drawn.
+ *
+ * Unassigned is not a district: it has no target, so it can take or give any number of people.
+ * When a request allows it (DistrictSolveRequest / GroupSolveRequest `includeUnassigned`, or 0
+ * listed in `absorbers`), a district may give blocks to Unassigned or take unassigned blocks.
+ * The rules every solver and verifier apply:
+ *  - The real district's side is held to the usual rules: its population must reach the target,
+ *    it must gain no new pieces, the compact-first and land-first rules apply.
+ *  - Unassigned's side has no rules: no population limit, no tolerance, and it may be left in
+ *    any number of pieces (it is not contiguous to begin with).
+ *  - Splits count as usual: a precinct, county or town divided between a district and
+ *    Unassigned is divided.
+ *  - Its deviation effect is zero: moving people to or from Unassigned neither helps nor hurts
+ *    a neighbor, so a real neighbor that a move brings closer to zero still ranks first.
+ *  - Unassigned never appears in `Solution.deviations` or in group feasibility excess; it does
+ *    appear in `transfers` and `borderFlows` as district 0.
+ * Without that permission, district 0 is never touched, exactly as before.
+ */
+export const UNASSIGNED = 0;
+
 export interface PopTargets {
   totalPop: number;
   numDistricts: number;
@@ -182,8 +203,13 @@ export interface DistrictSolveRequest {
   targets: PopTargets;
   /** The district to zero. Its neighbors absorb the difference. */
   district: number;
-  /** Restrict which neighbors may absorb. Default: all adjacent districts. */
+  /**
+   * Restrict which neighbors may absorb. Default: all adjacent districts, plus Unassigned when
+   * `includeUnassigned`. May list 0 (Unassigned, see UNASSIGNED), which allows it on its own.
+   */
   absorbers?: number[];
+  /** With no `absorbers`: also trade with adjacent unassigned blocks (see UNASSIGNED). Default false. */
+  includeUnassigned?: boolean;
   /**
    * A neighbor may not end further from draTarget than max(|its current deviation|, neighborTolerance).
    * Default 0: never leave a neighbor worse than it is now.
@@ -247,9 +273,17 @@ export interface GroupSolveRequest {
   allowOutsideAbsorb?: boolean;
   /**
    * With `allowOutsideAbsorb`: the only outside districts that may take or give. Absent = any
-   * outside district that touches the group. No other outside district is touched.
+   * outside district that touches the group. No other outside district is touched. May list 0
+   * (Unassigned, see UNASSIGNED).
    */
   absorbers?: number[];
+  /**
+   * With `allowOutsideAbsorb` and no `absorbers`: Unassigned may also take or give (see
+   * UNASSIGNED). Default false. It has no target and unlimited room, so an over group touching
+   * unassigned blocks it may use is always feasible; an under group is feasible only if the
+   * unassigned areas it touches hold enough people.
+   */
+  includeUnassigned?: boolean;
   solver: BorderSolver;
   weights?: Partial<CostWeights>;
   /** done / total border realizations, for the progress bar. */

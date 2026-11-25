@@ -1,7 +1,7 @@
 import type { Assignment, CostWeights, EngineGraph, SolutionStats, Transfer } from '@zd/contracts';
 import { COMPACT_DEPTH, isCompactTransfer } from './compact';
 import { choose, type TableCache } from './knapsack';
-import { Model } from './model';
+import { Model, sides } from './model';
 import { blockGrowthRank, measureTransferShape, shapePruneMeters } from './shape';
 import {
   borderRing, compareBlocks, compareChunks, computeRing, generate, realize,
@@ -114,7 +114,7 @@ function collectBorderUnits(
     if (people <= 0 || people > maxGoal) continue;
     let splitCost = 0;
     for (const p of precinctsTouched) {
-      if (precinctTracker.districtCount(p) === 1 && precinctTracker.countOf(p, from) > blocks.length) {
+      if (precinctTracker.districtCount(p, from === 0 || to === 0) === 1 && precinctTracker.countOf(p, from) > blocks.length) {
         splitCost += weights.newPrecinctSplit;
       }
     }
@@ -456,6 +456,10 @@ function runLayer2Expanded(
   for (const border of borders) {
     const { from, to } = border;
     model.ensureDistrict(from);
+    const pair = sides(from, to);
+    const shift = Number(to !== 0) - Number(from !== 0);
+    // As in search.ts generate(): Unassigned is a holder only on a border with it.
+    const withUnassigned = from === 0 || to === 0;
     const limit = border.limit + model.negativePopulation[from];
     const { seeds, size: ringSize } = computeRing(model, border,
       model.allowLongReach ? 11 : COMPACT_DEPTH, ring, queue, locked);
@@ -515,7 +519,7 @@ function runLayer2Expanded(
               if (old + 1 === countyTracker.countOf(county, from)) countySplits--;
             }
             const town = g.townOf?.[b];
-            if (town && townTracker!.districtCount(town) === 1) {
+            if (town && townTracker!.districtCount(town, withUnassigned) === 1) {
               const old = towns!.get(town) ?? 0;
               towns!.set(town, old + 1);
               if (!old) townSplits++;
@@ -523,9 +527,13 @@ function runLayer2Expanded(
             }
             for (let edge = g.adjOffsets[b]; edge < g.adjOffsets[b + 1]; edge++) {
               const next = g.adjTargets[edge];
-              if (a[next] === to) perimeter -= 2 * g.adjLen[edge];
-              if (a[next] !== from) continue;
-              perimeter += (included[next] === 2 ? -2 : 2) * g.adjLen[edge];
+              // As in search.ts generate(): an edge facing Unassigned lies on one perimeter only.
+              if (a[next] === to) perimeter -= pair * g.adjLen[edge];
+              if (a[next] !== from) {
+                if (shift && a[next] !== to) perimeter += shift * g.adjLen[edge];
+                continue;
+              }
+              perimeter += (included[next] === 2 ? -pair : pair) * g.adjLen[edge];
               if (included[next] || locked?.[next] || g.precinctOf[next] !== precinct ||
                 ((!whole || !model.allowLongReach) && !ring[next])) continue;
               included[next] = 1;
@@ -943,7 +951,7 @@ export function computeBorderReachability(
     from, to, maxChecked: 0, reachable: new Uint8Array(1), minReachable: 0, maxReachable: 0,
     denseRange: null, gaps: [], nearest: () => 0,
   });
-  if (from === to || !from || !to) return empty();
+  if (from === to) return empty();
 
   const model = new Model(graph, assignment, weights, true);
   const border: Border = { from, to, limit: Infinity };

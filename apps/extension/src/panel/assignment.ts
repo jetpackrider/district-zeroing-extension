@@ -168,3 +168,18 @@ export function districtPops(pop: Int32Array, assignment: Uint16Array, k: number
   }
   return out;
 }
+
+/**
+ * Unassigned blocks (district 0) and the people in them, for PanelState.unassigned: `blocks` 0
+ * means no block is unassigned (a finished map), and the panel shows no Unassigned row.
+ */
+export function unassignedOf(pop: Int32Array, assignment: Uint16Array): { blocks: number; pop: number } {
+  let blocks = 0;
+  let people = 0;
+  for (let b = 0; b < assignment.length; b++) {
+    if (assignment[b] !== 0) continue;
+    blocks++;
+    people += pop[b];
+  }
+  return { blocks, pop: people };
+}

@@ -714,8 +714,12 @@ export function paintRefusal(step: PaintStepRequest, m: Any = getModel()): strin
   const avail = paintAvailability(m);
   if (!avail.ok) return avail.reason ?? 'Painting is not available on this map.';
   const n = Number(m.dataContext?.nDistricts) || 0;
-  const okIndex = (i: number) => Number.isInteger(i) && i >= 1 && i <= n;
-  if (!okIndex(step.from) || !okIndex(step.to) || step.from === step.to) return `The step's districts (${step.from} → ${step.to}) do not fit this map's ${n} districts.`;
+  // 0 is Unassigned: a step to it erases its blocks, a step from it paints unassigned blocks. DRA's
+  // eraser does exactly this through the same actions (blockMap values 0; see callDra).
+  const okIndex = (i: number) => Number.isInteger(i) && i >= 0 && i <= n;
+  if (n < 1 || !okIndex(step.from) || !okIndex(step.to) || step.from === step.to) return `The step's districts (${step.from} → ${step.to}) do not fit this map's ${n} districts.`;
+  // DRA's own filter (filterLocked) skips an edit into or out of a locked row, Unassigned's row
+  // included if it were ever locked; refusing here says why instead of reporting "nothing changed".
   if (m.districtLocked(step.to)) return `${districtLabel(m, step.to)} is locked in DRA. Unlock it in DRA to paint into it.`;
   if (m.districtLocked(step.from)) return `${districtLabel(m, step.from)} is locked in DRA. Unlock it in DRA to paint out of it.`;
   const pending = uncommitted(m);
@@ -753,11 +757,18 @@ export function paintRefusal(step: PaintStepRequest, m: Any = getModel()): strin
  *  - blocks: DRA's own block-level paint, `actionPaintCity()`:
  *      c = undoredo.startComposite(); actionSetBlockDistricts({ filterLocked: true, blockMap, filterNoChange: true, pushUndo: true, counter: c });
  *      actionSetRedistrictProps({ fixContiguity: true, counter: c }); undoredo.endComposite()
+ * A step to Unassigned (to = 0) is DRA's eraser: the same two calls with blockMap values 0
+ * (`colorAt()` and the city tool both use `"erase" === mouseMode ? 0 : curDistrict`).
+ * actionSetFeatureDistricts sends a 0 as a delete (OpMapDel), so erased features leave the
+ * plan's block map; an absent key reads as 0 everywhere here (decodePrecinct, the panel).
  */
 function callDra(step: PaintStepRequest, m: Any, fbm: Record<string, number>): void {
   if (step.wholePrecinct) {
     const blockMap: Record<string, number> = {};
     for (const k of keysOfPrecinct(fbm, step.precinctId, blockMappingObj(m))) blockMap[k] = step.to;
+    // A wholly unassigned precinct has no key in the plan (DRA deletes 0s). DRA's map shows it as
+    // the precinct's own feature, so a click on it with the paint tool sends that ID.
+    if (!Object.keys(blockMap).length) blockMap[step.precinctId] = step.to;
     const arg = { blockMap, filterLocked: true, coalesce: true, pushUndo: true };
     m.actionSetFeatureDistricts(arg);
     return;

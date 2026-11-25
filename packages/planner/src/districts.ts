@@ -30,6 +30,81 @@ export function districtAdjacency(graph: EngineGraph, assignment: Assignment, nu
 }
 
 /**
+ * touches[d] = 1 when district d (1..numDistricts) shares a block edge with an unassigned
+ * block (district 0, see UNASSIGNED in @zd/contracts). Unassigned is not a district, so
+ * districtAdjacency never lists it; this is the separate answer for "may it trade with
+ * Unassigned". Index 0 is always 0.
+ */
+export function unassignedContact(graph: EngineGraph, assignment: Assignment, numDistricts: number): Uint8Array {
+  const touches = new Uint8Array(numDistricts + 1);
+  const { adjOffsets, adjTargets } = graph;
+  for (let u = 0; u < graph.n; u++) {
+    if (assignment[u] !== 0) continue;
+    for (let e = adjOffsets[u], end = adjOffsets[u + 1]; e < end; e++) {
+      const dv = assignment[adjTargets[e]];
+      if (dv !== 0 && dv <= numDistricts) touches[dv] = 1;
+    }
+  }
+  return touches;
+}
+
+/**
+ * The unassigned areas (unassigned blocks joined through unassigned blocks) and the people in
+ * each, for telling how many people Unassigned could give a set of districts: no more than
+ * everyone in the areas they touch. Water and zero-length links count as connections, as
+ * everywhere in the graph; this is an upper bound for feasibility, not a plan.
+ */
+export function unassignedSupply(graph: EngineGraph, assignment: Assignment, numDistricts: number) {
+  const { adjOffsets, adjTargets, pop } = graph;
+  const area = new Int32Array(graph.n).fill(-1);
+  const people: number[] = [];
+  /** areasOf[d] = the areas district d touches. */
+  const areasOf: Array<Set<number>> = Array.from({ length: numDistricts + 1 }, () => new Set());
+  const stack: number[] = [];
+  for (let s = 0; s < graph.n; s++) {
+    if (assignment[s] !== 0 || area[s] >= 0) continue;
+    const id = people.length;
+    let total = 0;
+    area[s] = id;
+    stack.push(s);
+    while (stack.length) {
+      const u = stack.pop()!;
+      if (pop[u] > 0) total += pop[u];
+      for (let e = adjOffsets[u], end = adjOffsets[u + 1]; e < end; e++) {
+        const v = adjTargets[e];
+        const dv = assignment[v];
+        if (dv === 0) {
+          if (area[v] < 0) { area[v] = id; stack.push(v); }
+        } else if (dv <= numDistricts) {
+          areasOf[dv].add(id);
+        }
+      }
+    }
+    people.push(total);
+  }
+  return {
+    /** Everyone in the unassigned areas that any of `districts` touches. */
+    peopleNear(districts: readonly number[]): number {
+      const areas = new Set<number>();
+      for (const d of districts) for (const a of areasOf[d] ?? []) areas.add(a);
+      let total = 0;
+      for (const a of areas) total += people[a];
+      return total;
+    },
+  };
+}
+
+/**
+ * Whether a group request may trade with Unassigned (see GroupSolveRequest): only with
+ * `allowOutsideAbsorb`, and then when `absorbers` lists 0, or when `absorbers` is absent and
+ * `includeUnassigned` is set.
+ */
+export function unassignedPermitted(req: { allowOutsideAbsorb?: boolean; absorbers?: number[]; includeUnassigned?: boolean }): boolean {
+  if (!req.allowOutsideAbsorb) return false;
+  return req.absorbers ? req.absorbers.includes(0) : req.includeUnassigned === true;
+}
+
+/**
  * Tracks district membership while a plan is realized border by border, and counts a
  * district's connected pieces by BFS over only that district's blocks (planner side;
  * the independent check in verify.ts uses its own union-find instead).
@@ -80,7 +155,11 @@ export class DistrictTracker {
     this.movedIn[to].length -= blocks.length;
   }
 
-  /** Number of connected pieces of district d in the current assignment. */
+  /**
+   * Number of connected pieces of district d in the current assignment. Always 0 for
+   * Unassigned (d = 0): it may be left in any number of pieces, so callers comparing piece
+   * counts before and after a move never reject one for what it does to Unassigned.
+   */
   components(d: number): number {
     if (d <= 0 || d > this.numDistricts) return 0;
     const a = this.assignment;

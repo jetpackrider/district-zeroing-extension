@@ -6,11 +6,14 @@ import {
   formatDistrictName,
   formatDistrictShort,
   formatInt,
+  formatPeople,
   formatSigned,
   formatSolutionTitle,
   formatSteps,
   getDeviationTone,
   getDistrictColor,
+  isUnassigned,
+  unassignedNet,
 } from '../format';
 
 interface SolutionCardProps {
@@ -44,8 +47,11 @@ export function SolutionCard({
   const title = formatSolutionTitle(card.kind, rankIndex);
   const compactness = formatCompactness(card.stats.perimeterDeltaM);
 
+  // Unassigned (district 0) has no deviation; it is never listed among the deviations.
+  const deviations = useMemo(() => card.deviations.filter((d) => !isUnassigned(d.district)), [card.deviations]);
+  const unassigned = useMemo(() => unassignedNet(card), [card]);
   const visibleTrades = showAllFlows ? trades : trades.slice(0, PREVIEW_LIMIT);
-  const visibleDevs = showAllDevs ? card.deviations : card.deviations.slice(0, PREVIEW_LIMIT);
+  const visibleDevs = showAllDevs ? deviations : deviations.slice(0, PREVIEW_LIMIT);
 
   const winsSplits = Boolean(badges?.includes('Fewest new splits'));
   const winsBlocks = Boolean(badges?.includes('Fewest blocks'));
@@ -113,6 +119,16 @@ export function SolutionCard({
         <div className="zd-solution-card__reach" data-testid={`long-reach-${card.id}`}>
           Long reach: no compact bite out of the border hits the number, so this one reaches further
           in, through a chain of blocks.
+        </div>
+      )}
+
+      {unassigned.traded && (
+        <div className="zd-solution-card__unassigned" data-testid={`unassigned-${card.id}`}>
+          {unassigned.net > 0
+            ? `Leaves ${formatInt(unassigned.net)} more ${unassigned.net === 1 ? 'person' : 'people'} unassigned.`
+            : unassigned.net < 0
+              ? `Takes ${formatPeople(unassigned.net)} from unassigned blocks.`
+              : 'Swaps blocks with Unassigned; as many people are unassigned as before.'}
         </div>
       )}
 
@@ -279,7 +295,7 @@ export function SolutionCard({
       )}
 
       {/* Before → after deviations */}
-      {card.deviations.length > 0 && (
+      {deviations.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <div className="zd-dev-changes" aria-label="District deviations before and after">
             {visibleDevs.map((dev) => {
@@ -305,7 +321,7 @@ export function SolutionCard({
               );
             })}
           </div>
-          {card.deviations.length > PREVIEW_LIMIT && (
+          {deviations.length > PREVIEW_LIMIT && (
             <button
               type="button"
               className="zd-expand-link"
@@ -316,7 +332,7 @@ export function SolutionCard({
             >
               {showAllDevs
                 ? 'Show fewer districts'
-                : `Show all ${card.deviations.length} affected districts`}
+                : `Show all ${deviations.length} affected districts`}
             </button>
           )}
         </div>

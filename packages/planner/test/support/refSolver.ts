@@ -264,12 +264,13 @@ export class ReferenceSolver implements BorderSolver {
     if (!accept.length) return [];
     const maxOptions = Math.max(1, Math.min(8, req.maxOptions ?? 5));
     const g = req.graph;
-    const fromPiecesBefore = pieces(g, req.assignment, req.from);
-    const toPiecesBefore = pieces(g, req.assignment, req.to);
+    const fromPiecesBefore = req.from === 0 ? 0 : pieces(g, req.assignment, req.from);
+    const toPiecesBefore = req.to === 0 ? 0 : pieces(g, req.assignment, req.to);
+    // Unassigned (0) may be left in any number of pieces (see UNASSIGNED in @zd/contracts).
     const works = (blocks: number[]) => {
       const a = req.assignment.slice();
       for (const b of blocks) a[b] = req.to;
-      return pieces(g, a, req.from) <= fromPiecesBefore && pieces(g, a, req.to) <= toPiecesBefore;
+      return (req.from === 0 || pieces(g, a, req.from) <= fromPiecesBefore) && (req.to === 0 || pieces(g, a, req.to) <= toPiecesBefore);
     };
     for (const hops of this.opts.hops ?? [3, 6, 10]) {
       const opts = this.options(req, hops, w);

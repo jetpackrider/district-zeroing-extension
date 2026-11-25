@@ -177,8 +177,12 @@ export interface HookBlockMapping {
 }
 
 export interface HighlightFeatureProps {
-  /** 'remove' = leaves the user's district, 'add' = joins it, 'done' = painted, 'precinct' = outline to shatter, 'border' = interaction-view hover. */
-  role: 'remove' | 'add' | 'done' | 'precinct' | 'border' | 'preview';
+  /**
+   * 'remove' = leaves the user's district, 'add' = joins it, 'erase' = goes to Unassigned (DRA's
+   * eraser; neutral grey), 'done' = painted, 'precinct' = outline to shatter, 'border' =
+   * interaction-view hover.
+   */
+  role: 'remove' | 'add' | 'erase' | 'done' | 'precinct' | 'border' | 'preview';
   label?: string;
   geoid?: string;
 }

@@ -1,6 +1,6 @@
 import type { SolutionStats, Transfer } from '@zd/contracts';
 import { compactnessIssue } from './compact';
-import { isStrandable, Model } from './model';
+import { isStrandable, Model, sides } from './model';
 import { growthRank, shapePruneMeters } from './shape';
 
 export interface Border {
@@ -54,7 +54,9 @@ export function computeRing(
     const b = fromBlocks[i];
     if (locked?.[b]) continue;
     const emptyOffRing = !model.allowLongReach && !g.pop[b];
-    if (emptyOffRing && model.precinctTracker.districtCount(g.precinctOf[b]) !== 1) continue;
+    // "Entirely in the donor" counts Unassigned as a holder only when it is a side of this border
+    // (see RegionTracker): between two real districts, unassigned blocks change nothing here.
+    if (emptyOffRing && model.precinctTracker.districtCount(g.precinctOf[b], from === 0 || to === 0) !== 1) continue;
     for (let e = g.adjOffsets[b]; e < g.adjOffsets[b + 1]; e++) {
       if (assignment[g.adjTargets[e]] !== to) continue;
       const p = g.precinctOf[b];
@@ -102,6 +104,13 @@ export function generate(model: Model, borders: Border[], depth: number, locked?
   for (const border of borders) {
     const { from, to } = border;
     model.ensureDistrict(from);
+    // Perimeter bookkeeping: an edge between `from` and `to` lies on `pair` perimeters (2, or 1
+    // when one side is Unassigned), and an edge to a third district changes by `shift` when the
+    // block changes hands (0 between two districts; ±1 when one side of the border is Unassigned).
+    const pair = sides(from, to);
+    const shift = Number(to !== 0) - Number(from !== 0);
+    // Split bookkeeping counts Unassigned as a holder only on a border with it (see RegionTracker).
+    const withUnassigned = from === 0 || to === 0;
     // Adjusted Census counts can be signed. A later negative block or chunk can
     // compensate for a positive prefix above the requested border total.
     const limit = border.limit + model.negativePopulation[from];
@@ -145,7 +154,7 @@ export function generate(model: Model, borders: Border[], depth: number, locked?
           picked = [...chosenIdx].sort((x, y) => x - y).map(i => viable[i]);
         }
 
-        const entirePrecinct = precinctTracker.districtCount(precinct) === 1;
+        const entirePrecinct = precinctTracker.districtCount(precinct, withUnassigned) === 1;
         const grow = (initial: number[], fringe: number[], whole: boolean, variant: number) => {
           const blocks: number[] = [];
           const frontier: number[] = [];
@@ -172,7 +181,7 @@ export function generate(model: Model, borders: Border[], depth: number, locked?
               if (old + 1 === countyTracker.countOf(county, from)) countySplits--;
             }
             const town = g.townOf?.[b];
-            if (town && townTracker!.districtCount(town) === 1) {
+            if (town && townTracker!.districtCount(town, withUnassigned) === 1) {
               const old = towns!.get(town) ?? 0;
               towns!.set(town, old + 1);
               if (!old) townSplits++;
@@ -180,9 +189,12 @@ export function generate(model: Model, borders: Border[], depth: number, locked?
             }
             for (let edge = g.adjOffsets[b]; edge < g.adjOffsets[b + 1]; edge++) {
               const next = g.adjTargets[edge];
-              if (a[next] === to) perimeter -= 2 * g.adjLen[edge];
-              if (a[next] !== from) continue;
-              perimeter += (included[next] === 2 ? -2 : 2) * g.adjLen[edge];
+              if (a[next] === to) perimeter -= pair * g.adjLen[edge];
+              if (a[next] !== from) {
+                if (shift && a[next] !== to) perimeter += shift * g.adjLen[edge];
+                continue;
+              }
+              perimeter += (included[next] === 2 ? -pair : pair) * g.adjLen[edge];
               // A precinct that lies entirely in the donor and is taken whole is one unit (see
               // compact.ts): its growth is not held to the block ring, which leaves out every
               // empty block. Everything else, including the donor's fragment of a split
@@ -378,6 +390,8 @@ export function realize(
     const { seen, visit } = model.nextSeen();
     for (const [block, chunk] of owners) {
       const { from, to } = chunk.border;
+      // Unassigned may keep its holes: nothing is stranded by leaving them.
+      if (!from) continue;
       for (let edge = g.adjOffsets[block]; edge < g.adjOffsets[block + 1]; edge++) {
         const start = g.adjTargets[edge];
         if (seen[start] === visit || after[start] !== from || g.pop[start]) continue;

@@ -9,6 +9,7 @@ import type {
   WalkthroughStep,
 } from '@zd/contracts';
 import {
+  DRAWING_PLAN_SOLUTION,
   GROUP_CHAIN_SOLUTIONS,
   NY_MAP_INFO,
   SCENARIOS,
@@ -17,6 +18,7 @@ import {
   buildInteractionForDistricts,
   makeChosenNeighborOptions,
   makeChainWalkthroughSteps,
+  makeDrawingWalkthroughSteps,
   makeNYDistricts,
   makeTwoWayWalkthroughSteps,
 } from './scenarios';
@@ -143,17 +145,17 @@ export class MockController implements PanelController {
           }
         }
         cur.status = 'done';
-        const districts = this.applyLiveTransfer(cur.from, cur.to, moved);
+        const live = this.applyLiveTransfer(cur.from, cur.to, moved);
         const hasNext = wt.current + 1 < steps.length;
         if (hasNext) steps[wt.current + 1].status = 'active';
         this.state = {
           ...this.state,
-          districts,
+          ...live,
           walkthrough: {
             ...wt,
             steps,
             current: hasNext ? wt.current + 1 : wt.current,
-            finalCheck: hasNext ? undefined : this.buildFinalCheck(districts),
+            finalCheck: hasNext ? undefined : this.buildFinalCheck(live.districts),
           },
         };
         this.emit();
@@ -161,12 +163,12 @@ export class MockController implements PanelController {
       }
 
       nextBlock.done = true;
-      const districts = this.applyLiveTransfer(cur.from, cur.to, nextBlock.people);
+      const live = this.applyLiveTransfer(cur.from, cur.to, nextBlock.people);
       const allBlocksDone = cur.blocks.every((b) => b.done);
       cur.status = allBlocksDone ? 'awaiting-commit' : 'active';
       this.state = {
         ...this.state,
-        districts,
+        ...live,
         walkthrough: { ...wt, steps },
       };
       this.emit();
@@ -203,18 +205,18 @@ export class MockController implements PanelController {
       }
       // Painting a block step commits it directly: no shatter, no checkmark.
       step.status = 'done';
-      const districts = this.applyLiveTransfer(step.from, step.to, moved);
+      const live = this.applyLiveTransfer(step.from, step.to, moved);
       const next = steps.findIndex((s, i) => i > w.current && s.status !== 'done');
       if (next >= 0 && steps[next].status === 'pending') steps[next].status = 'active';
       this.state = {
         ...this.state,
-        districts,
+        ...live,
         autoPaint: { ...a, busy: false },
         walkthrough: {
           ...w,
           steps,
           current: next >= 0 ? next : w.current,
-          finalCheck: next >= 0 ? undefined : this.buildFinalCheck(districts),
+          finalCheck: next >= 0 ? undefined : this.buildFinalCheck(live.districts),
         },
       };
       this.emit();
@@ -253,7 +255,8 @@ export class MockController implements PanelController {
       case 'set-district-lock': {
         if (this.state.walkthrough) return;
         const next = new Set(this.state.lockedDistricts ?? []);
-        for (const d of action.districts) {
+        // Unassigned (0) is not a district and is never locked.
+        for (const d of action.districts.filter((x) => x !== 0)) {
           if (action.locked) next.add(d);
           else next.delete(d);
         }
@@ -459,7 +462,12 @@ export class MockController implements PanelController {
         this.emit();
         return;
       }
-      const nbr = targetRow.neighbors?.[0] ?? (targetRow.index === 1 ? 2 : 1);
+      // "Any neighbor": an unlocked one, and Unassigned (0) only while it holds people.
+      const lockedSet = new Set(this.state.lockedDistricts ?? []);
+      const allowed = (targetRow.neighbors ?? []).filter((d) =>
+        d === 0 ? (this.state.unassigned?.pop ?? 0) > 0 : !lockedSet.has(d),
+      );
+      const nbr = allowed[0] ?? targetRow.neighbors?.[0] ?? (targetRow.index === 1 ? 2 : 1);
       const nbrRow = districts.find((d) => d.index === nbr);
       const from = targetRow.deviation > 0 ? targetRow.index : nbr;
       const to = targetRow.deviation > 0 ? nbr : targetRow.index;
@@ -552,27 +560,29 @@ export class MockController implements PanelController {
         ? makeChainWalkthroughSteps()
         : solutionId === TWO_WAY_WALKTHROUGH_SOLUTION.id
           ? makeTwoWayWalkthroughSteps()
-          : (card?.borderFlows ?? [{ from: 13, to: 12, people: 412 }]).slice(0, 6).map((flow, idx) => {
-              const b1 = Math.max(1, Math.round(flow.people * 0.4));
-              const b2 = Math.max(1, Math.round(flow.people * 0.35));
-              const b3 = Math.max(1, flow.people - b1 - b2);
-              return {
-                id: `wt-step-${idx + 1}`,
-                from: flow.from,
-                to: flow.to,
-                precinctId: `36061-${String(110 + idx * 7).padStart(4, '0')}`,
-                wholePrecinct: idx === 1 && flow.people >= 150,
-                status: idx === 0 ? 'active' : 'pending',
-                blocks:
-                  flow.people < 3
-                    ? [{ geoid: `3606100420010${idx}1`, number: 1, people: flow.people, done: false }]
-                    : [
-                        { geoid: `3606100420010${idx}1`, number: 1, people: b1, done: false },
-                        { geoid: `3606100420010${idx}4`, number: 2, people: b2, done: false },
-                        { geoid: `3606100420010${idx}8`, number: 3, people: b3, done: false },
-                      ],
-              };
-            });
+          : solutionId === DRAWING_PLAN_SOLUTION.id
+            ? makeDrawingWalkthroughSteps()
+            : (card?.borderFlows ?? [{ from: 13, to: 12, people: 412 }]).slice(0, 6).map((flow, idx) => {
+                const b1 = Math.max(1, Math.round(flow.people * 0.4));
+                const b2 = Math.max(1, Math.round(flow.people * 0.35));
+                const b3 = Math.max(1, flow.people - b1 - b2);
+                return {
+                  id: `wt-step-${idx + 1}`,
+                  from: flow.from,
+                  to: flow.to,
+                  precinctId: `36061-${String(110 + idx * 7).padStart(4, '0')}`,
+                  wholePrecinct: idx === 1 && flow.people >= 150,
+                  status: idx === 0 ? 'active' : 'pending',
+                  blocks:
+                    flow.people < 3
+                      ? [{ geoid: `3606100420010${idx}1`, number: 1, people: flow.people, done: false }]
+                      : [
+                          { geoid: `3606100420010${idx}1`, number: 1, people: b1, done: false },
+                          { geoid: `3606100420010${idx}4`, number: 2, people: b2, done: false },
+                          { geoid: `3606100420010${idx}8`, number: 3, people: b3, done: false },
+                        ],
+                };
+              });
 
     this.state = {
       ...this.state,
@@ -666,8 +676,9 @@ export class MockController implements PanelController {
     return { feasible: false, excess, suggestAdd };
   }
 
-  private applyLiveTransfer(from: number, to: number, people: number) {
-    return this.state.districts.map((d) => {
+  /** Live districts (and DRA's Unassigned row) after `people` move from one district to another. */
+  private applyLiveTransfer(from: number, to: number, people: number): Pick<PanelState, 'districts' | 'unassigned'> {
+    const districts = this.state.districts.map((d) => {
       if (d.index === from) {
         return { ...d, pop: d.pop - people, deviation: d.deviation - people };
       }
@@ -676,6 +687,13 @@ export class MockController implements PanelController {
       }
       return d;
     });
+    // Unassigned (0) is not in `districts`: erasing adds to it, painting unassigned blocks takes from it.
+    let unassigned = this.state.unassigned;
+    if (from === 0 || to === 0) {
+      const pop = (unassigned?.pop ?? 0) + (to === 0 ? people : 0) - (from === 0 ? people : 0);
+      unassigned = { pop: Math.max(0, pop) };
+    }
+    return { districts, unassigned };
   }
 
   private buildFinalCheck(districts = this.state.districts) {

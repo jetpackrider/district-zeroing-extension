@@ -5,6 +5,7 @@
 import {
   computeTargets,
   isZeroed,
+  UNASSIGNED,
   type BundleSource,
   type EngineGraph,
   type GroupFeasibility,
@@ -23,7 +24,7 @@ import {
 import { createBundleSource, geoidIndex, toEngineGraph } from '../adapters/bundle';
 import type { PanelHost } from '../shared/panel-host';
 import { HOOK_VERSION, type BBox, type HighlightFC, type HookBlockMapping, type HookSnapshot, type HookToPanel, type HighlightStatus, type PaintResult, type SelfCheck } from '../shared/protocol';
-import { buildLiveMapping, districtPops, featureMapToAssignment, type LiveMapping } from './assignment';
+import { buildLiveMapping, districtPops, featureMapToAssignment, unassignedOf, type LiveMapping } from './assignment';
 import { labelIndexes, parseBlockCsv, stateFromGeoid } from './csv';
 import { CancelledError, EngineClient } from './engine-client';
 import { GeometryCache, type HighlightItem, type HighlightSink } from './highlights';
@@ -32,7 +33,7 @@ import { TabLink, type LinkStatus } from './tab-link';
 import { allStepsDone, applyTargets, buildSteps, deviationChanges, tickWalkthrough, type WalkPlan } from './walkthrough';
 import { buildDiagnostics, type DiagnosticsInput } from './diagnostics';
 import type { WorkerResponse } from '../worker/protocol';
-import { choiceTolerance, joinDistrictNames, sanitizeScope, solveDistrictMessage, withoutLocked } from '../worker/choice';
+import { joinDistrictNames, oneDistrictTrade, sanitizeScope, solveDistrictMessage, withoutLocked } from '../worker/choice';
 
 type Source = 'live' | 'csv';
 
@@ -398,6 +399,7 @@ export class ExtensionController implements PanelController {
       notice: { level: 'info', text: 'Open one of your maps in DRA to start, or drop a DRA block-assignment CSV here.' },
       map: undefined,
       districts: [],
+      unassigned: undefined,
       solutions: [],
       hoveredSolutionId: undefined,
       feasibility: undefined,
@@ -452,6 +454,12 @@ export class ExtensionController implements PanelController {
       return;
     }
     const patch: Partial<PanelState> = { districts: rows };
+    // Until the bundle gives a block-level assignment (recompute), DRA's own Unassigned row decides.
+    if (!this.assignment) {
+      const pop = snap.districts.find((d) => d.index === UNASSIGNED)?.pop ?? 0;
+      const unassigned = pop > 0 ? { pop } : undefined;
+      if (JSON.stringify(unassigned) !== JSON.stringify(this.state.unassigned)) patch.unassigned = unassigned;
+    }
     const sameMap = this.state.map && JSON.stringify(this.state.map) === JSON.stringify(map);
     if (!sameMap) patch.map = map;
     const c = this.state.connection;
@@ -550,6 +558,7 @@ export class ExtensionController implements PanelController {
     this.unresolved = res.unresolved;
     this.ensureGraph();
     this.checkMismatch();
+    this.syncUnassigned();
     this.updateNeighbors();
     this.tick();
     const ms = performance.now() - t0;
@@ -633,7 +642,27 @@ export class ExtensionController implements PanelController {
     }
   }
 
+  /**
+   * PanelState.unassigned: present while some block is unassigned. Live, its people are DRA's
+   * Unassigned row (the mismatch check holds the bundle to it); CSV, the bundle's count.
+   */
+  private syncUnassigned() {
+    const a = this.assignment;
+    const b = this.bundle;
+    if (!a || !b) return;
+    const u = unassignedOf(b.pop[this.popField], a);
+    const draPop = this.source === 'live' ? this.snap?.districts.find((d) => d.index === UNASSIGNED)?.pop : undefined;
+    const unassigned = u.blocks ? { pop: draPop ?? u.pop } : undefined;
+    if (JSON.stringify(unassigned) !== JSON.stringify(this.state.unassigned)) this.set({ unassigned });
+  }
+
+  /** People in unassigned blocks of the map a solve plans from (CSV: including steps marked painted). */
+  private unassignedPop(assignment: Uint16Array): number {
+    return this.bundle ? unassignedOf(this.bundle.pop[this.popField], assignment).pop : (this.state.unassigned?.pop ?? 0);
+  }
+
   private neighborsKey = '';
+  /** Adjacent districts per district; 0 (Unassigned) is listed for a district touching unassigned blocks. */
   private updateNeighbors() {
     const g = this.graph;
     const a = this.assignment;
@@ -642,10 +671,10 @@ export class ExtensionController implements PanelController {
     const sets = Array.from({ length: k + 1 }, () => new Set<number>());
     for (let i = 0; i < g.n; i++) {
       const da = a[i];
-      if (!da) continue;
+      if (!da || da > k) continue;
       for (let e = g.adjOffsets[i]; e < g.adjOffsets[i + 1]; e++) {
         const db = a[g.adjTargets[e]];
-        if (db && db !== da) sets[da].add(db);
+        if (db !== da) sets[da].add(db);
       }
     }
     const key = sets.map((s) => [...s].sort((x, y) => x - y).join(',')).join(';');
@@ -685,7 +714,7 @@ export class ExtensionController implements PanelController {
       this.targets = null;
       this.neighborsKey = '';
       this.solveSeq++;
-      this.set({ ...INITIAL, scope: this.state.scope, solve: this.bundleLoading && !this.bundle ? this.state.solve : { status: 'idle' } });
+      this.set({ ...INITIAL, unassigned: undefined, scope: this.state.scope, solve: this.bundleLoading && !this.bundle ? this.state.solve : { status: 'idle' } });
     }
     this.link.reconnect();
     this.link.send({ t: 'run-self-check' });
@@ -708,15 +737,20 @@ export class ExtensionController implements PanelController {
   }
 
   /**
-   * With "outside neighbors absorb" and locks: the outside districts that may still take or give.
-   * Undefined when nothing is locked (any outside neighbor).
+   * With "outside neighbors absorb": who outside the group may take or give. With locks, the
+   * outside districts that are not locked (`absorbers`); without, any outside neighbor (no
+   * `absorbers`). Unassigned joins in either way while unassigned blocks hold people (0 in
+   * `absorbers`, or `includeUnassigned`). The whole map and a closed group trade with no one outside.
    */
-  private outsideAbsorbers(scope: Scope, districts: number[]): number[] | undefined {
+  private outsideTrade(scope: Scope, districts: number[], unassignedPop: number): { absorbers?: number[]; includeUnassigned?: boolean } {
+    if (scope.mode !== 'group' || !scope.allowOutsideAbsorb) return {};
+    const withUnassigned = unassignedPop > 0;
     const locked = this.lockedSet();
-    if (scope.mode !== 'group' || !scope.allowOutsideAbsorb || !locked.size) return undefined;
+    if (!locked.size) return withUnassigned ? { includeUnassigned: true } : {};
     const inGroup = new Set(districts);
     const k = this.targets?.numDistricts ?? 0;
-    return Array.from({ length: k }, (_, i) => i + 1).filter((d) => !inGroup.has(d) && !locked.has(d));
+    const open = Array.from({ length: k }, (_, i) => i + 1).filter((d) => !inGroup.has(d) && !locked.has(d));
+    return { absorbers: withUnassigned ? [UNASSIGNED, ...open] : open };
   }
 
   /** Lock or unlock districts: a locked district is never changed by a suggestion. */
@@ -725,6 +759,7 @@ export class ExtensionController implements PanelController {
     if (!map || this.state.walkthrough) return;
     const next = new Set(this.state.lockedDistricts ?? []);
     for (const d of districts) {
+      // 0 (Unassigned) is not a district and is never locked.
       if (!Number.isInteger(d) || d < 1 || d > map.numDistricts) continue;
       if (lock) next.add(d);
       else next.delete(d);
@@ -756,6 +791,7 @@ export class ExtensionController implements PanelController {
   private neighborsOf = (d: number) => this.state.districts.find((r) => r.index === d)?.neighbors;
 
   private districtName(d: number): string {
+    if (d === UNASSIGNED) return 'Unassigned';
     const label = this.state.districts.find((r) => r.index === d)?.label?.trim();
     if (!label) return `District ${d}`;
     return /^\d+$/.test(label) ? `District ${label}` : label;
@@ -799,7 +835,7 @@ export class ExtensionController implements PanelController {
         targets: this.targets,
         districts,
         allowOutsideAbsorb: scope.mode === 'group' ? scope.allowOutsideAbsorb : false,
-        absorbers: this.outsideAbsorbers(scope, districts),
+        ...this.outsideTrade(scope, districts, this.unassignedPop(this.assignment)),
       })
       .then((r) => {
         done();
@@ -857,19 +893,28 @@ export class ExtensionController implements PanelController {
     const lockedDistricts = this.state.lockedDistricts ?? [];
     const lockedSet = new Set(lockedDistricts);
     const lockedNames = this.districtNames(lockedDistricts);
+    if (scope.mode === 'one' && scope.district === UNASSIGNED) {
+      this.set({ solutions: [], solve: { status: 'error', message: 'Unassigned is not a district, so it has no number to reach. Pick a district to zero; it can trade with Unassigned.' } });
+      return;
+    }
     if (scope.mode === 'one' && lockedSet.has(scope.district)) {
       this.set({ solutions: [], solve: { status: 'error', message: `${this.districtName(scope.district)} is locked, so nothing may change it. Unlock it in the district list to zero it.` } });
       return;
     }
-    // With locks, a one-district solve trades only with the neighbors that are not locked.
-    const one = scope.mode === 'one' ? scope.district : 0;
-    const openNeighbors = one && lockedSet.size ? this.neighborsOf(one)?.filter((d) => !lockedSet.has(d)) : undefined;
-    if (openNeighbors && openNeighbors.length === 0) {
-      this.set({ solutions: [], solve: { status: 'error', message: `Every district next to ${this.districtName(one)} is locked, so there is nowhere for people to go. Unlock one of its neighbors.` } });
+    const assignment = this.planningAssignment();
+    const unassignedPop = this.unassignedPop(assignment);
+    // One district: who it trades with (the choice, or any neighbor; with locks, the open ones;
+    // Unassigned per the Scope 'one' rule). Nobody to trade with: say so instead of solving.
+    const devOf = (d: number) => this.state.districts.find((r) => r.index === d)?.deviation ?? 0;
+    const trade =
+      scope.mode === 'one'
+        ? oneDistrictTrade({ district: scope.district, with: scope.with, neighbors: this.neighborsOf(scope.district), lockedDistricts, unassignedPop, deviationOf: devOf, name: (d) => this.districtName(d) })
+        : null;
+    if (trade?.error) {
+      this.set({ solutions: [], solve: { status: 'error', message: trade.error } });
       return;
     }
     const seq = ++this.solveSeq;
-    const assignment = this.planningAssignment();
     const targets = this.targets!;
     this.set({ solve: { status: 'solving', progress: 0 }, solutions: [], hoveredSolutionId: undefined });
     const t0 = performance.now();
@@ -880,18 +925,17 @@ export class ExtensionController implements PanelController {
       let feasibility: GroupFeasibility | undefined;
       let interaction: InteractionGraph | undefined;
       let workerMs = 0;
-      if (scope.mode === 'one') {
+      if (scope.mode === 'one' && trade) {
         // The user's choice of neighbors (absent = any neighbor, today's behavior: no neighbor may end
         // further from zero). A chosen neighbor may take or give the whole difference, whatever it
-        // does to its own deviation: that is the user's call.
+        // does to its own deviation: that is the user's call. Unassigned has no limit either way.
         const district = scope.district;
-        const chosen = scope.mode === 'one' && scope.with?.length ? scope.with.filter((d) => !lockedSet.has(d) && (this.neighborsOf(scope.district)?.includes(d) ?? true)) : [];
-        const devOf = (d: number) => this.state.districts.find((r) => r.index === d)?.deviation ?? 0;
-        const choice = chosen.length
-          ? { absorbers: chosen, neighborTolerance: choiceTolerance(devOf(scope.district), chosen.map(devOf)) }
-          : openNeighbors
-            ? { absorbers: openNeighbors }
-            : {};
+        const chosen = trade.chosen;
+        const choice = {
+          ...(trade.absorbers ? { absorbers: trade.absorbers } : {}),
+          ...(trade.includeUnassigned ? { includeUnassigned: true } : {}),
+          ...(trade.neighborTolerance !== undefined ? { neighborTolerance: trade.neighborTolerance } : {}),
+        };
         const r = await this.engine!.request<Extract<WorkerResponse, { type: 'district-result' }>>({ type: 'solve-district', assignment, targets, district: scope.district, ...choice, maxOptions: 6, locked: opts.locked, lockedDistricts, testDelayMs: this.testSolveDelayMs || undefined });
         solutions = r.result.solutions;
         message = r.result.message;
@@ -919,7 +963,7 @@ export class ExtensionController implements PanelController {
           return;
         }
         const r = await this.engine!.request<Extract<WorkerResponse, { type: 'group-result' }>>(
-          { type: 'solve-group', assignment, targets, districts, allowOutsideAbsorb: scope.mode === 'group' ? scope.allowOutsideAbsorb : false, absorbers: this.outsideAbsorbers(scope, districts), locked: opts.locked, lockedDistricts, testDelayMs: this.testSolveDelayMs || undefined },
+          { type: 'solve-group', assignment, targets, districts, allowOutsideAbsorb: scope.mode === 'group' ? scope.allowOutsideAbsorb : false, ...this.outsideTrade(scope, districts, unassignedPop), locked: opts.locked, lockedDistricts, testDelayMs: this.testSolveDelayMs || undefined },
           (done, total) => {
             this.progressEvents++;
             if (seq === this.solveSeq) this.set({ solve: { status: 'solving', progress: total ? done / total : 0 } });
@@ -943,6 +987,12 @@ export class ExtensionController implements PanelController {
           const size = off ? `${Math.abs(off).toLocaleString('en-US')} ${Math.abs(off) === 1 ? 'person' : 'people'} ${off > 0 ? 'over' : 'under'}` : 'out of balance';
           const helps = r.result.feasibility.suggestAdd.filter((d) => lockedSet.has(d));
           message = `With ${lockedNames} locked, the unlocked districts that touch each other are ${size} between them, so they cannot all reach zero. ${helps.length ? `Unlock ${this.districtName(helps[0])}, which could absorb the difference` : 'Unlock a district next to them that is off the other way'}, or zero the locked districts' neighbors first.`;
+        }
+        if (r.result.status === 'group-unbalanced' && scope.mode === 'all' && unassignedPop > 0) {
+          // The whole map never trades with Unassigned, and the targets count everyone: while people
+          // are unassigned the districts are short by that many between them. That is the reason.
+          const who = `${unassignedPop.toLocaleString('en-US')} ${unassignedPop === 1 ? 'person is' : 'people are'}`;
+          message = `${who} still unassigned; finish assigning them, or zero districts one at a time or as a group with Unassigned.`;
         }
       }
       if (seq !== this.solveSeq) return;
@@ -1016,10 +1066,11 @@ export class ExtensionController implements PanelController {
     this.miniSink?.clear();
   }
 
+  /** Highlight role of a block moving from -> to. Going to Unassigned (an erase) is neutral grey. */
   private roleFor(from: number, to: number): HighlightItem['role'] {
+    if (to === UNASSIGNED) return 'erase';
     const s = this.state.scope;
     if (s.mode === 'one') return from === s.district ? 'remove' : 'add';
-    void to;
     return 'add';
   }
 
@@ -1406,6 +1457,7 @@ export class ExtensionController implements PanelController {
       notice: { level: 'info', text: `Using ${fileName}. The CSV holds committed edits only and there is no live ticking: press Next after painting each step.${back}` },
       map: undefined,
       districts: [],
+      unassigned: undefined,
       solutions: [],
       hoveredSolutionId: undefined,
       feasibility: undefined,
@@ -1439,6 +1491,7 @@ export class ExtensionController implements PanelController {
       ...(missing ? { notice: { level: 'warn' as const, text: `${fileName}: ${missing} GEOIDs are not in the ${state} data bundle.` } } : {}),
     });
     this.neighborsKey = '';
+    this.syncUnassigned();
     this.updateNeighbors();
     if (this.state.scope.mode !== 'one') this.refreshInteraction();
   }

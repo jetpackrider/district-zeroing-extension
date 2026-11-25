@@ -57,6 +57,11 @@ describe('CSV fallback', () => {
     expect([...labelIndexes(['3', '1', '2'])]).toEqual([['3', 3], ['1', 1], ['2', 2]]);
     expect(stateFromGeoid('360010001001000')).toBe('NY');
   });
+  it('reads a district of "0" as unassigned, so the real districts keep their numbers', () => {
+    const p = parseBlockCsv('GEOID20,District\n360010001001000,1\n360010001001001,0\n360010001001002,2\n360010001001003,00\n');
+    expect(p.rows.map((r) => r.geoid)).toEqual(['360010001001000', '360010001001002']);
+    expect([...labelIndexes(p.labels)]).toEqual([['1', 1], ['2', 2]]);
+  });
 });
 
 describe('out-of-scope detection', () => {

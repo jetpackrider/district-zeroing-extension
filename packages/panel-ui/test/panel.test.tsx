@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { PanelAction } from '@zd/contracts';
 import { MockController, Panel, SCENARIOS, mountPanel } from '../src';
-import { solutionBadges } from '../src/format';
+import { UNASSIGNED_COLOR, formatDistrictName, formatDistrictShort, getDistrictColor, solutionBadges } from '../src/format';
 
 describe('Panel — connection states & notices', () => {
   it('renders no-tab with retry button and CSV drop zone', async () => {
@@ -968,5 +968,252 @@ describe('Panel — locking finished districts', () => {
     expect([...last.districts].sort((a, b) => a - b)).toEqual(already);
     expect(screen.getByRole('button', { name: 'Unlock District 3' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.queryByTestId('lock-zeroed')).not.toBeInTheDocument();
+  });
+});
+
+describe('Panel — Unassigned (a map still being drawn)', () => {
+  const noDistrictZero = () => expect(document.body.textContent ?? '').not.toMatch(/District 0\b/);
+
+  it('names district 0 "Unassigned" everywhere, with a neutral grey swatch', () => {
+    const districts = SCENARIOS['live-drawing-unassigned'].createState().districts;
+    expect(formatDistrictName(0, districts)).toBe('Unassigned');
+    expect(formatDistrictShort(0, districts)).toBe('Unassigned');
+    expect(getDistrictColor(0, districts)).toBe(UNASSIGNED_COLOR);
+    expect(formatDistrictName(1, districts)).toBe('District 1');
+  });
+
+  it('over district whose only unlocked neighbor is Unassigned: offers it, explains the default, and picks it', async () => {
+    const user = userEvent.setup();
+    const actions: PanelAction[] = [];
+    const controller = new MockController({ initialScenario: 'live-drawing-unassigned', onAction: (a) => actions.push(a) });
+    render(<Panel controller={controller} />);
+
+    const chooser = screen.getByTestId('neighbor-chooser');
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent(
+      'District 1 gives 583 people to Unassigned, the only neighbor that is not locked.',
+    );
+    // Unassigned shows its population now → after, not a deviation, and never "further from zero".
+    const row = screen.getByTestId('chooser-row-0');
+    expect(row).toHaveTextContent(/Unassigned\s*pop\s*249,837\s*→\s*250,420/);
+    expect(row).not.toHaveTextContent('further from zero');
+    expect(screen.getByTestId('chooser-locked-note')).toHaveTextContent('District 2 is locked and is left out.');
+    expect(screen.getByTestId('chooser-unassigned-note')).toHaveTextContent(
+      '"Any neighbor" includes Unassigned while the map is still being drawn (249,837 people unassigned now).',
+    );
+    expect(within(chooser).getAllByRole('checkbox')).toHaveLength(1);
+
+    // Locks never apply to Unassigned: its row in the district list has no lock button.
+    const listRow = screen.getByTestId('unassigned-row');
+    expect(listRow).toHaveTextContent(/Unassigned\s*249,837\s*no target/);
+    expect(within(listRow).queryByRole('button')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Lock Unassigned/i })).toBeNull();
+
+    await user.click(screen.getByRole('checkbox', { name: 'Give to Unassigned' }));
+    expect(actions[actions.length - 1]).toEqual({ type: 'set-scope', scope: { mode: 'one', district: 1, with: [0] } });
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent('District 1 gives 583 people to Unassigned only.');
+    expect(screen.getByRole('checkbox', { name: 'Give to Unassigned' })).toBeChecked();
+
+    // Solving with Unassigned picked: the options move people to it, and deviations leave it out.
+    await user.click(screen.getByRole('button', { name: /Find zeroing options/i }));
+    const card = screen.getByTestId('solution-card-opt-1-to-0');
+    expect(within(card).getByTestId('unassigned-opt-1-to-0')).toHaveTextContent('Leaves 583 more people unassigned.');
+    expect(card).toHaveTextContent(/District 1:\s*\+583\s*→\s*0/);
+    expect(controller.getState().solutions[0].deviations.map((d) => d.district)).toEqual([1]);
+    noDistrictZero();
+  });
+
+  it('"Any neighbor" on a map still being drawn includes Unassigned next to real neighbors; a real one closer to zero ranks first', async () => {
+    const user = userEvent.setup();
+    const base = SCENARIOS['live-drawing-unassigned'].createState();
+    // District 3 (−420) touches 0, 2 (locked) and 4 (−250,000, pushed further by giving).
+    const controller = new MockController({ initialState: { ...base, scope: { mode: 'one', district: 3 }, solutions: [] } });
+    render(<Panel controller={controller} />);
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent(
+      'District 3 takes 420 people from any neighbor, Unassigned included; the solver picks which.',
+    );
+    expect(screen.getByTestId('chooser-row-0')).toHaveTextContent(/249,837\s*→\s*249,417/);
+    expect(screen.getByTestId('chooser-row-4')).toHaveTextContent('further from zero');
+    // Unassigned (effect zero) sits before a neighbor that ends further from zero.
+    let boxes = within(screen.getByTestId('neighbor-chooser')).getAllByRole('checkbox');
+    expect(boxes.map((b) => b.getAttribute('aria-label'))).toEqual(['Take from Unassigned', 'Take from District 4']);
+
+    // …and after a real neighbor that the move brings closer to zero.
+    act(() => {
+      const s = controller.getState();
+      controller.setState({
+        ...s,
+        lockedDistricts: [],
+        districts: s.districts.map((d) => (d.index === 2 ? { ...d, pop: d.pop + 300, deviation: 300 } : d)),
+      });
+    });
+    boxes = within(screen.getByTestId('neighbor-chooser')).getAllByRole('checkbox');
+    expect(boxes.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Take from District 2',
+      'Take from Unassigned',
+      'Take from District 4',
+    ]);
+
+    // Picking a real neighbor and Unassigned reads naturally, Unassigned last.
+    await user.click(screen.getByRole('checkbox', { name: 'Take from Unassigned' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Take from District 2' }));
+    expect(controller.getState().scope).toEqual({ mode: 'one', district: 3, with: [0, 2] });
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent(
+      'District 3 takes 420 people from District 2 and Unassigned, split between them as the solver finds best.',
+    );
+    noDistrictZero();
+  });
+
+  it('finished map still touching empty unassigned blocks: offered, used only when picked, with a note', async () => {
+    const user = userEvent.setup();
+    const controller = new MockController({ initialScenario: 'live-finished-unassigned-adjacent' });
+    render(<Panel controller={controller} />);
+    expect(controller.getState().unassigned).toBeUndefined();
+    expect(screen.queryByTestId('unassigned-row')).toBeNull();
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent('District 1 gives 583 people to any neighbor; the solver picks which.');
+    expect(screen.getByTestId('chooser-row-0')).toHaveTextContent(/pop\s*0\s*→\s*583/);
+    expect(screen.getByTestId('chooser-unassigned-note')).toHaveTextContent(
+      'No people are unassigned, so "Any neighbor" leaves Unassigned out. Picking it leaves 583 people unassigned.',
+    );
+
+    // "Any neighbor" here solves with District 2, not Unassigned.
+    await user.click(screen.getByRole('button', { name: /Find zeroing options/i }));
+    expect(controller.getState().solutions.flatMap((c) => c.borderFlows.map((f) => f.to))).toEqual([2]);
+
+    await user.click(screen.getByRole('checkbox', { name: 'Give to Unassigned' }));
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent('District 1 gives 583 people to Unassigned only.');
+    expect(screen.getByTestId('chooser-unassigned-note')).toHaveTextContent('This leaves 583 people unassigned on a map that had none.');
+
+    // Every real neighbor locked: the summary says to pick Unassigned rather than "any neighbor".
+    act(() => controller.dispatch({ type: 'set-district-lock', districts: [2], locked: true }));
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent(
+      'District 1 gives 583 people to Unassigned only.',
+    );
+    act(() => controller.dispatch({ type: 'set-scope', scope: { mode: 'one', district: 1 } }));
+    expect(screen.getByTestId('chooser-summary')).toHaveTextContent(
+      'Every district next to District 1 is locked. Pick Unassigned to give them to unassigned blocks.',
+    );
+    // A lock on 0 is never taken.
+    act(() => controller.dispatch({ type: 'set-district-lock', districts: [0], locked: true }));
+    expect(controller.getState().lockedDistricts).toEqual([2]);
+  });
+
+  it('cards and plan flows name Unassigned and say what a plan does to it', () => {
+    const controller = new MockController({ initialScenario: 'live-drawing-unassigned' });
+    const base = controller.getState();
+    const takeOnly = {
+      ...base.solutions[0],
+      id: 'take-only',
+      borderFlows: [{ from: 0, to: 3, people: 420 }],
+      // A stray 0 in deviations is never shown.
+      deviations: [{ district: 3, before: -420, after: 0 }, { district: 0, before: 0, after: 0 }],
+    };
+    const plan = SCENARIOS['walkthrough-unassigned'].createState().solutions[0];
+    controller.setState({ ...base, solutions: [...base.solutions, takeOnly, plan] });
+    render(<Panel controller={controller} />);
+
+    expect(screen.getByTestId('unassigned-draw-opt-1')).toHaveTextContent('Leaves 583 more people unassigned.');
+    expect(screen.getByTestId('unassigned-take-only')).toHaveTextContent('Takes 420 people from unassigned blocks.');
+    expect(screen.getByTestId('solution-card-take-only')).not.toHaveTextContent(/Unassigned:\s*0\s*→/);
+
+    const planCard = screen.getByTestId(`solution-card-${plan.id}`);
+    const flows = within(planCard).getByLabelText('Border transfers');
+    expect(flows).toHaveTextContent(/1\s*→\s*Unassigned:\s*583/);
+    expect(flows).toHaveTextContent(/Unassigned\s*→\s*3:\s*420/);
+    expect(within(planCard).getByTestId(`unassigned-${plan.id}`)).toHaveTextContent('Leaves 163 more people unassigned.');
+    const devs = within(planCard).getByLabelText('District deviations before and after');
+    expect(devs).toHaveTextContent(/District 1:\s*\+583\s*→\s*0/);
+    expect(devs).toHaveTextContent(/District 3:\s*−420\s*→\s*0/);
+    expect(devs).not.toHaveTextContent('Unassigned');
+    // Cards that never touch Unassigned say nothing about it.
+    noDistrictZero();
+  });
+
+  it('a card on a complete map has no Unassigned line', () => {
+    render(<Panel controller={new MockController({ initialScenario: 'live-single' })} />);
+    expect(screen.queryByTestId('unassigned-opt-1')).toBeNull();
+    expect(screen.queryByTestId('unassigned-row')).toBeNull();
+    expect(screen.queryByTestId('chooser-row-0')).toBeNull();
+  });
+
+  it('walkthrough: a step into Unassigned is erasing, a step out of it paints unassigned blocks', async () => {
+    const user = userEvent.setup();
+    const controller = new MockController({ initialScenario: 'walkthrough-unassigned', paintDelayMs: 20 });
+    render(<Panel controller={controller} />);
+
+    const instruction = () => screen.getByTestId('step-instruction');
+    expect(instruction()).toHaveTextContent(
+      'Step 1 of 3: with Block paint on, click the outlined precinct to shatter it, then with the Eraser erase the 3 highlighted blocks. They become unassigned.',
+    );
+    expect(instruction()).not.toHaveTextContent(/into/);
+    const meta = screen.getByLabelText('Current walkthrough step');
+    expect(meta).toHaveTextContent(/District 1\s*→\s*Unassigned/);
+    // Unassigned's swatch is neutral grey.
+    const swatches = [...meta.querySelectorAll<HTMLElement>('.zd-step-border .zd-swatch')].map((el) => el.style.backgroundColor);
+    expect(swatches).toContain('rgb(156, 163, 175)');
+    expect(screen.getByText('Blocks to erase')).toBeInTheDocument();
+    expect(screen.getByTestId('walkthrough-block-1')).toHaveTextContent('To erase');
+    expect(screen.getByTestId('paint-step-btn')).toHaveTextContent('Erase this step');
+    expect(screen.getByTestId('paint-step-what')).toHaveTextContent(
+      'Erases the 3 highlighted blocks (383 people), leaving them unassigned; no shattering or checkmark needed.',
+    );
+
+    // Erasing a block moves its people into Unassigned.
+    act(() => {
+      controller.tickNextBlock();
+    });
+    expect(controller.getState().unassigned).toEqual({ pop: 249837 + 160 });
+
+    // Step 2: the whole precinct is erased.
+    await user.click(screen.getByTestId('outline-step-1'));
+    expect(instruction()).toHaveTextContent(
+      'Step 2 of 3: with Precinct paint on, use the Eraser to erase the whole outlined precinct (32003-0415). Its 200 people become unassigned; no shattering needed.',
+    );
+    expect(screen.getByTestId('paint-step-what')).toHaveTextContent('Erases the whole precinct 32003-0415 (200 people), leaving it unassigned.');
+
+    // Step 3: unassigned blocks painted into District 3, never "from District 0".
+    await user.click(screen.getByTestId('outline-step-2'));
+    expect(instruction()).toHaveTextContent(
+      'Step 3 of 3: with Block paint on, click the outlined precinct to shatter it, then paint the 2 highlighted unassigned blocks into District 3.',
+    );
+    expect(screen.getByLabelText('Current walkthrough step')).toHaveTextContent(/Unassigned\s*→\s*District 3/);
+    expect(screen.getByTestId('paint-step-btn')).toHaveTextContent('Paint this step');
+    await user.click(screen.getByTestId('paint-step-btn'));
+    await waitFor(() => expect(controller.getState().unassigned).toEqual({ pop: 249837 + 160 - 420 }));
+
+    // The outline names the borders with Unassigned too.
+    const outline = screen.getByLabelText('All walkthrough steps by border');
+    expect(outline).toHaveTextContent(/District 1\s*→\s*Unassigned/);
+    expect(outline).toHaveTextContent(/Unassigned\s*→\s*District 3/);
+    noDistrictZero();
+  });
+
+  it('stray edits to or from Unassigned name it', () => {
+    const base = SCENARIOS['walkthrough-unassigned'].createState();
+    const controller = new MockController({
+      initialState: {
+        ...base,
+        walkthrough: { ...base.walkthrough!, strayEdits: [{ geoid: '320030499001001', fromDistrict: 4, toDistrict: 0 }] },
+      },
+    });
+    render(<Panel controller={controller} />);
+    expect(screen.getByTestId('stray-edits-banner')).toHaveTextContent(/4\s*→\s*Unassigned/);
+    noDistrictZero();
+  });
+
+  it('group mode: Unassigned is never added as a group member, and its list row cannot be selected', async () => {
+    const user = userEvent.setup();
+    const actions: PanelAction[] = [];
+    const base = SCENARIOS['live-drawing-unassigned'].createState();
+    const controller = new MockController({
+      initialState: { ...base, scope: { mode: 'group', districts: [3], allowOutsideAbsorb: false }, solutions: [] },
+      onAction: (a) => actions.push(a),
+    });
+    render(<Panel controller={controller} />);
+    expect(within(screen.getByTestId('unassigned-row')).queryByRole('checkbox')).toBeNull();
+    await user.click(screen.getByRole('button', { name: /Add neighbors/i }));
+    expect(actions[actions.length - 1]).toEqual({
+      type: 'set-scope',
+      scope: { mode: 'group', districts: [3, 4], allowOutsideAbsorb: false },
+    });
   });
 });

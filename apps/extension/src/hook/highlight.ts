@@ -25,6 +25,7 @@ const COLOR = [
   ['get', 'role'],
   'remove', '#d7263d',
   'add', '#1b65d6',
+  'erase', '#757575',
   'done', '#2fa84f',
   'precinct', '#ff9800',
   'border', '#9c27b0',
@@ -283,7 +284,7 @@ export class HighlightLayers {
         const el = document.createElement('div');
         el.className = 'zd-label';
         el.textContent = f.properties.label ?? '';
-        const c = f.properties.role === 'done' ? '#2fa84f' : f.properties.role === 'remove' ? '#d7263d' : '#1b65d6';
+        const c = f.properties.role === 'done' ? '#2fa84f' : f.properties.role === 'remove' ? '#d7263d' : f.properties.role === 'erase' ? '#757575' : '#1b65d6';
         el.style.cssText = `position:absolute;transform:translate(-50%,-50%);font:bold 12px/1 system-ui,sans-serif;color:#fff;background:${c};border:1.5px solid #fff;border-radius:9px;padding:2px 5px;white-space:nowrap;`;
         (el as HTMLDivElement & { _ll?: unknown })._ll = (f.geometry as { coordinates: [number, number] }).coordinates;
         return el;

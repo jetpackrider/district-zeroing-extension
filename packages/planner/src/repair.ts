@@ -24,6 +24,12 @@ import { hashSolution } from './hash';
  *   - chains:    A → B → C, each with its own amount
  *   - cycles:    A → B, B → C, C → A
  *
+ * Unassigned (district 0, listed in `adjacency` only when the request allows it) has no
+ * target, so a district can give it or take from it any amount: a two-way trade with it is
+ * pointless (the net amount should cross one way). The search first looks for a combination
+ * with no such trade, neither a swap with 0 nor a transfer back over a border with 0 that the
+ * plan already crossed the other way (`crossed`); only if none exists does it allow them.
+ *
  * Which districts end at q + 1 is left free: every selected district only has to land in
  * [q, q + 1] (or exactly q when the state divides evenly); conservation fixes the count.
  *
@@ -74,6 +80,7 @@ export interface RepairInput {
   selected: Uint8Array;
   /** absorber[d] = 1 for outside districts allowed to give or take (allowOutsideAbsorb). */
   absorber: Uint8Array;
+  /** Neighbors per district; may list 0 (Unassigned) when it is allowed (absorber[0] = 1). */
   adjacency: number[][];
   memo: RepairMemo;
   /** Weights and caller lock; part of every memo key. */
@@ -84,6 +91,11 @@ export interface RepairInput {
   onCommit: (t: Transfer) => void;
   onDebug?: (message: string) => void;
   avoidBorder?: number;
+  /**
+   * Directed borders (pairKey) the plan already crossed before repair. Used only to avoid a
+   * two-way trade with Unassigned; updated with every committed transfer.
+   */
+  crossed?: Set<number>;
 }
 
 export interface RepairStuck {
@@ -184,6 +196,9 @@ export function repairResiduals(input: RepairInput): RepairResult {
 
   const allowedNeighbors = (g: number): number[] =>
     input.adjacency[g].filter((n) => selected[n] || absorber[n]);
+  const crossed = input.crossed ?? new Set<number>();
+  /** Unassigned is in play: search without two-way trades with it first. */
+  const unassignedInPlay = !!absorber[0] && input.adjacency.some((list) => list.includes(0));
 
   /** Find, check and commit the shortest combination that zeroes district f. */
   const localSearch = (f: number): boolean => {
@@ -207,6 +222,8 @@ export function repairResiduals(input: RepairInput): RepairResult {
       return c;
     };
     const menuCache = new Map<string, Item[]>();
+    /** True on the first pass: no two-way trade with Unassigned (see the header). */
+    let strictUnassigned = false;
 
     /** Menu of one directed border: cheapest options for any amount in 1..M (one call; three at level 2). */
     const menu = (from: number, to: number, need: number, level: number): Item[] => {
@@ -302,6 +319,10 @@ export function repairResiduals(input: RepairInput): RepairResult {
       for (const n of allowedNeighbors(g)) {
         const from = give ? g : n;
         const to = give ? n : g;
+        // With Unassigned, one direction per border: no swaps, and no single transfer back
+        // over a border this combination already crossed the other way.
+        const unassigned = n === 0;
+        if (unassigned && strictUnassigned && (used.has(pairKey(to, from)) || crossed.has(pairKey(to, from)))) continue;
         const rightUsed = used.has(pairKey(from, to));
         const lastOnly = bad.some((d) => d !== g && d !== n);
         // Single transfers in the direction g needs.
@@ -320,7 +341,7 @@ export function repairResiduals(input: RepairInput): RepairResult {
           for (const it of items) if (!banned.has(it.key) && !conflicts(it)) consider([it], 1);
         }
         // Swaps: x in the needed direction, then y back, with x - y putting g in its band.
-        if (left >= 2 && !rightUsed && !used.has(pairKey(to, from))) {
+        if (left >= 2 && !(unassigned && strictUnassigned) && !rightUsed && !used.has(pairKey(to, from))) {
           const viable = (it: Item) => !banned.has(it.key) && !conflicts(it);
           const xs = menu(from, to, need, level).filter(viable);
           const ys = menu(to, from, need, level).filter(viable);
@@ -404,13 +425,17 @@ export function repairResiduals(input: RepairInput): RepairResult {
     };
     for (let check = 0; check < REPAIR_VALIDATIONS; check++) {
       let combo: Item[] | null = null;
-      for (let depth = 1; depth <= REPAIR_MAX_DEPTH && !combo; depth++) {
-        nodes = 0;
-        combo = dfs(depth, 1);
-        if (!combo && depth <= 3) {
+      for (const strict of unassignedInPlay ? [true, false] : [false]) {
+        strictUnassigned = strict;
+        for (let depth = 1; depth <= REPAIR_MAX_DEPTH && !combo; depth++) {
           nodes = 0;
-          combo = dfs(depth, 2);
+          combo = dfs(depth, 1);
+          if (!combo && depth <= 3) {
+            nodes = 0;
+            combo = dfs(depth, 2);
+          }
         }
+        if (combo) break;
       }
       if (!combo) { debugDump(); return false; }
       const badIdx = applyChecked(combo);
@@ -423,6 +448,7 @@ export function repairResiduals(input: RepairInput): RepairResult {
         for (const b of t.blocks) lock[b] = 1;
         rho[t.from] -= t.people;
         rho[t.to] += t.people;
+        crossed.add(pairKey(t.from, t.to));
         committed.push(t);
         input.onCommit(t);
       }

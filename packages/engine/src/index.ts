@@ -203,7 +203,8 @@ function capacityWitnesses(model: Model, border: Border, locked?: Uint8Array) {
 
 function solveScoredRaw(req: BorderSolveRequest, allowLongReach = false) {
   const { graph, assignment, from, to, weights, locked } = req;
-  if (from === to || !from || !to) return [];
+  // Either side may be Unassigned (0): the caller decided it may trade (see UNASSIGNED).
+  if (from === to) return [];
   const accept = [...new Set(req.accept.filter(n => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b);
   if (!accept.length) return [];
   const border = { from, to, limit: accept[accept.length - 1] };
@@ -322,7 +323,9 @@ function capacityRaw(
   allowLongReach = false,
 ): CapacityCurve {
   const tiers: CapacityCurve['tiers'] = [];
-  if (from === to || !from || !to) return { from, to, tiers };
+  // With Unassigned (0) on either side, only the district's rules limit what can cross:
+  // Unassigned has room for anyone, but only blocks that can actually move are counted.
+  if (from === to) return { from, to, tiers };
   const names = ['no-split', 'low', 'high'] as const;
   let lastPeople = 0, lastCost = 0, marginalCost = 0;
   for (const { tier, transfer, stats } of capacityWitnesses(new Model(graph, assignment, weights, true, allowLongReach),
@@ -341,6 +344,14 @@ export function borderReachability(req: BorderReachabilityRequest): BorderReacha
 }
 
 export function solveDistrict(req: DistrictSolveRequest): SolveResult {
+  const result = solveDistrictSettled(req);
+  // Unassigned (0) trades only with permission: listed in `absorbers`, or `includeUnassigned`.
+  const unassigned = req.absorbers ? req.absorbers.includes(0) : !!req.includeUnassigned;
+  if (unassigned) rankRealNeighborsFirst(result.solutions, req.district);
+  return result;
+}
+
+function solveDistrictSettled(req: DistrictSolveRequest): SolveResult {
   const land = landView(req.graph);
   if (!land) return solveDistrictRaw(req);
   const start = now();
@@ -375,6 +386,50 @@ export function solveDistrict(req: DistrictSolveRequest): SolveResult {
   };
 }
 
+/**
+ * UNASSIGNED's ranking rule: "a real neighbor that a move brings closer to zero still ranks
+ * first". The search's own cost gives such a neighbor only a small per-person credit, so an
+ * Unassigned option with fewer splits or a shorter border can still come out ahead of it. When
+ * some option trades with Unassigned, this moves the options that bring at least one real
+ * neighbor closer to zero ahead of the rest, keeping the search's order within each part. Without
+ * an option touching 0 (every complete map, every request without permission) nothing moves.
+ * solveDistrictRaw applies it before cutting the list to `maxOptions` (see districtSearch);
+ * solveDistrict applies it again after the land-first pass re-sorts by cost.
+ */
+function rankRealNeighborsFirst(solutions: Solution[], district: number): void {
+  if (!solutions.some(s => s.borderFlows.some(f => f.from === 0 || f.to === 0))) return;
+  const helps = (s: Solution) => s.deviations.some(d => d.district !== district && Math.abs(d.after) < Math.abs(d.before));
+  const first = solutions.filter(helps);
+  if (!first.length || first.length === solutions.length) return;
+  const rest = solutions.filter(s => !helps(s));
+  solutions.splice(0, solutions.length, ...first, ...rest);
+}
+
+/**
+ * The one-district search. Without Unassigned it is a single search over every border, exactly as
+ * before. With Unassigned (`unassigned`), the search's own cost may fill every slot with
+ * Unassigned options (fewer splits, a shorter border) and leave out a real neighbor that the move
+ * would bring closer to zero, which UNASSIGNED says must rank first. So the real borders are also
+ * searched on their own, which finds exactly the options a request without Unassigned would find,
+ * and both searches run for the full 8 options so the answer does not depend on how many were
+ * asked for. The caller ranks the merged list (rankRealNeighborsFirst) and then cuts it. When
+ * the district has no border with Unassigned, permission changes nothing at all.
+ */
+function districtSearch(model: Model, borders: Border[], accept: number[], maxOptions: number | undefined, unassigned: boolean): Scored[] {
+  const real = borders.filter(border => border.from !== 0 && border.to !== 0);
+  // No border with Unassigned (it is not permitted, or the district does not touch it, as on
+  // every complete map): exactly the search a request without permission runs.
+  if (!unassigned || real.length === borders.length) return search(model, borders, accept, maxOptions);
+  const all = search(model, borders, accept, 8);
+  if (!real.length) return all;
+  const merged = new Map<string, Scored>();
+  for (const option of [...search(model, real, accept, 8), ...all]) {
+    const id = signature(option);
+    if (!merged.has(id)) merged.set(id, option);
+  }
+  return [...merged.values()].sort(compare);
+}
+
 function solveDistrictRaw(req: DistrictSolveRequest): SolveResult {
   const start = now();
   const { graph, assignment, district, targets, absorbers, weights, maxOptions } = req;
@@ -388,17 +443,29 @@ function solveDistrictRaw(req: DistrictSolveRequest): SolveResult {
   if (goals.includes(before[district])) return { status: 'already-zero', solutions: [], elapsedMs: now() - start };
   const accept = goals.map(goal => Math.abs(goal - before[district])).sort((a, b) => a - b);
   const over = before[district] > targets.q;
+  // Unassigned (0) trades only with permission: listed in `absorbers`, or `includeUnassigned`
+  // when no absorbers are given. Without it district 0 is never touched.
+  const unassigned = absorbers ? absorbers.includes(0) : !!req.includeUnassigned;
   const neighbors = new Set<number>();
   const districtBlocks = model.districtBlocks(district);
   for (let i = 0; i < districtBlocks.length; i++) {
     const b = districtBlocks[i];
     for (let e = graph.adjOffsets[b]; e < graph.adjOffsets[b + 1]; e++) {
       const d = assignment[graph.adjTargets[e]];
-      if (d && d !== district && (!absorbers || absorbers.includes(d))) neighbors.add(d);
+      if (d === district) continue;
+      if (d ? !absorbers || absorbers.includes(d) : unassigned) neighbors.add(d);
     }
   }
   const borders: Border[] = [];
   for (const neighbor of [...neighbors].sort((a, b) => a - b)) {
+    if (!neighbor) {
+      // Unassigned has no target: it can take or give the whole amount, and doing so neither
+      // helps nor hurts it (no `effect`). A real neighbor that the move brings closer to zero
+      // earns the usual neighborDeviation credit, so it ranks ahead of an otherwise equal
+      // Unassigned option.
+      borders.push({ from: over ? district : 0, to: over ? 0 : district, limit: accept[accept.length - 1] });
+      continue;
+    }
     const deviation = before[neighbor] - targets.draTarget;
     const tolerance = Math.max(Math.abs(deviation), req.neighborTolerance ?? 0);
     const limit = Math.min(accept[accept.length - 1], Math.floor(tolerance - (over ? deviation : -deviation)));
@@ -407,7 +474,7 @@ function solveDistrictRaw(req: DistrictSolveRequest): SolveResult {
       effect: people => Math.abs(deviation + (over ? people : -people)) - Math.abs(deviation),
     });
   }
-  const found = borders.length ? search(model, borders, accept, maxOptions) : [];
+  const found = borders.length ? districtSearch(model, borders, accept, maxOptions, unassigned) : [];
   const solutions: Solution[] = found.map(option => {
     const changes = new Map<number, number>();
     const borderFlows = option.transfers.map(({ from, to, people }) => {
@@ -415,12 +482,20 @@ function solveDistrictRaw(req: DistrictSolveRequest): SolveResult {
       changes.set(to, (changes.get(to) ?? 0) + people);
       return { from, to, people };
     });
+    // Unassigned is not a district: it appears in transfers and borderFlows, never here.
+    changes.delete(0);
     const deviations = [...changes].sort(([a], [b]) => a - b).map(([d, change]) => ({
       district: d, before: before[d] - targets.draTarget, after: before[d] + change - targets.draTarget,
     }));
     return { id: signature(option), kind: 'single', transfers: option.transfers, stats: option.stats,
       borderFlows, deviations };
   });
+  if (unassigned && neighbors.has(0)) {
+    // The searches above ran for the full 8 options; rank, then keep what was asked for, so a
+    // helped real neighbor comes first however few options are requested.
+    rankRealNeighborsFirst(solutions, district);
+    solutions.splice(maxSolutions(maxOptions));
+  }
   const elapsedMs = now() - start;
   return solutions.length ? { status: 'ok', solutions, elapsedMs } : {
     status: 'needs-precinct-rework', solutions, elapsedMs,

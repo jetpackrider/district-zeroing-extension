@@ -96,12 +96,14 @@ function applied(assignment: Assignment, transfers: readonly Transfer[]): Uint16
 /**
  * True when the transfers hold together over land alone: counting only blocks with land and only
  * land edges, neither the giving nor the receiving district ends up with more pieces than it
- * started with. `land` is the land view of the graph.
+ * started with. `land` is the land view of the graph. Unassigned (0) is not held to this: it may
+ * be left in any number of pieces (see UNASSIGNED in @zd/contracts).
  */
 export function isLandContiguous(land: EngineGraph, assignment: Assignment, transfers: readonly Transfer[]): boolean {
   const after = applied(assignment, transfers);
   const districts = new Set<number>();
   for (const t of transfers) districts.add(t.from).add(t.to);
+  districts.delete(0);
   for (const d of districts) {
     if (components(land, after, d, true).count > components(land, assignment, d, true).count) return false;
   }

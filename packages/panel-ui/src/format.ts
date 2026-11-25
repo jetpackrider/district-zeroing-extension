@@ -1,5 +1,5 @@
-import { computeTargets, isZeroed } from '@zd/contracts';
-import type { DistrictRow, MapInfo, PopField, Scope, SolutionCard, SolutionKind } from '@zd/contracts';
+import { UNASSIGNED, computeTargets, isZeroed } from '@zd/contracts';
+import type { DistrictRow, MapInfo, PanelState, PopField, Scope, SolutionCard, SolutionKind } from '@zd/contracts';
 
 /** Typographic minus sign (U+2212) for clean tabular deviation formatting. */
 export const MINUS = '\u2212';
@@ -42,7 +42,21 @@ export function getDeviationTone(deviation: number, map?: MapInfo): DeviationTon
   return deviation > 0 ? 'over' : 'under';
 }
 
+/**
+ * Unassigned (district 0) is not a district: a map still being drawn has blocks in no district.
+ * Everywhere the panel turns a district index into words, 0 reads "Unassigned".
+ */
+export const UNASSIGNED_NAME = 'Unassigned';
+
+/** Neutral grey for Unassigned's swatch (DRA draws unassigned blocks uncolored). */
+export const UNASSIGNED_COLOR = '#9ca3af';
+
+export function isUnassigned(index: number): boolean {
+  return index === UNASSIGNED;
+}
+
 export function formatDistrictName(index: number, districts: DistrictRow[]): string {
+  if (isUnassigned(index)) return UNASSIGNED_NAME;
   const row = districts.find((d) => d.index === index);
   const raw = row?.label?.trim();
   if (!raw) return `District ${index}`;
@@ -51,12 +65,14 @@ export function formatDistrictName(index: number, districts: DistrictRow[]): str
 }
 
 export function formatDistrictShort(index: number, districts: DistrictRow[]): string {
+  if (isUnassigned(index)) return UNASSIGNED_NAME;
   const row = districts.find((d) => d.index === index);
   const raw = row?.label?.trim();
   return raw && raw.length > 0 ? raw : String(index);
 }
 
 export function getDistrictColor(index: number, districts: DistrictRow[]): string | undefined {
+  if (isUnassigned(index)) return UNASSIGNED_COLOR;
   return districts.find((d) => d.index === index)?.color;
 }
 
@@ -207,6 +223,60 @@ export function neighborChoiceRows(district: DistrictRow, districts: DistrictRow
   return rows.sort(
     (a, b) => Math.abs(a.after) - Math.abs(a.before) - (Math.abs(b.after) - Math.abs(b.before)) || a.index - b.index,
   );
+}
+
+/** Names for a list of district indexes, with Unassigned (if listed) last: "District 2 and Unassigned". */
+export function formatNeighborNames(indexes: number[], districts: DistrictRow[]): string[] {
+  const real = indexes.filter((d) => !isUnassigned(d));
+  const names = real.map((d) => formatDistrictName(d, districts));
+  if (real.length < indexes.length) names.push(UNASSIGNED_NAME);
+  return names;
+}
+
+/** What trading with Unassigned would do, for the neighbor choice of one district. */
+export interface UnassignedChoice {
+  /** People in unassigned blocks now (DRA's Unassigned row; 0 when absent). */
+  before: number;
+  /**
+   * People in unassigned blocks if Unassigned took (over district) or gave (under district) the
+   * whole difference. Never below 0: Unassigned cannot give people it does not have.
+   */
+  after: number;
+  /**
+   * "Any neighbor" includes Unassigned: only while it holds people (a map still being drawn).
+   * On a finished map it is used only when picked.
+   */
+  inDefault: boolean;
+  /** Under district: Unassigned holds fewer people than the district needs. */
+  short: boolean;
+}
+
+/**
+ * The Unassigned choice for one district, when the district touches unassigned blocks. It has no
+ * deviation and no target, so it is never "further from zero" and never locked.
+ */
+export function unassignedChoice(district: DistrictRow, state: Pick<PanelState, 'unassigned'>): UnassignedChoice | undefined {
+  if (!district.neighbors?.includes(UNASSIGNED)) return undefined;
+  const before = Math.max(0, state.unassigned?.pop ?? 0);
+  // Over: the district gives `deviation` people to Unassigned. Under: Unassigned gives |deviation|.
+  const raw = before + district.deviation;
+  return { before, after: Math.max(0, raw), inDefault: before > 0, short: raw < 0 };
+}
+
+/**
+ * People a card moves into Unassigned, net of people it takes out of it. Positive = the card
+ * leaves more people unassigned; negative = it takes people from unassigned blocks. `traded` is
+ * true when any flow touches Unassigned at all.
+ */
+export function unassignedNet(card: Pick<SolutionCard, 'borderFlows'>): { net: number; traded: boolean } {
+  let net = 0;
+  let traded = false;
+  for (const f of card.borderFlows) {
+    if (f.from === f.to || f.people <= 0) continue;
+    if (isUnassigned(f.to)) { net += f.people; traded = true; }
+    if (isUnassigned(f.from)) { net -= f.people; traded = true; }
+  }
+  return { net, traded };
 }
 
 /**

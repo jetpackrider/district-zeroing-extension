@@ -11,11 +11,15 @@ export type WorkerRequest =
    * `absorbers`: the user's choice of neighbors (Scope `with`); absent = any neighbor. Options and
    * fallback plans that trade with any other district are dropped (see `choiceDropped`).
    * `lockedDistricts`: districts the user locked. The panel already leaves them out of `absorbers`
-   * and `districts`; the worker also drops any solution that would touch one.
+   * and `districts`; the worker also drops any solution that would touch one. Never holds 0.
+   * Unassigned (district 0): `includeUnassigned` (with no `absorbers`) or 0 in `absorbers` lets the
+   * solve trade with unassigned blocks (see UNASSIGNED in @zd/contracts). Without either, a
+   * solution that touches district 0 is dropped.
    */
-  | { type: 'solve-district'; id: number; assignment: Assignment; targets: PopTargets; district: number; absorbers?: number[]; neighborTolerance?: number; maxOptions?: number; locked?: Uint8Array; lockedDistricts?: number[]; testDelayMs?: number }
-  | { type: 'solve-group'; id: number; assignment: Assignment; targets: PopTargets; districts: number[]; allowOutsideAbsorb: boolean; absorbers?: number[]; locked?: Uint8Array; lockedDistricts?: number[]; testDelayMs?: number }
-  | { type: 'interaction'; id: number; assignment: Assignment; targets: PopTargets; districts: number[]; allowOutsideAbsorb: boolean; absorbers?: number[] };
+  | { type: 'solve-district'; id: number; assignment: Assignment; targets: PopTargets; district: number; absorbers?: number[]; includeUnassigned?: boolean; neighborTolerance?: number; maxOptions?: number; locked?: Uint8Array; lockedDistricts?: number[]; testDelayMs?: number }
+  /** `includeUnassigned` / 0 in `absorbers`: as GroupSolveRequest, with `allowOutsideAbsorb` only. */
+  | { type: 'solve-group'; id: number; assignment: Assignment; targets: PopTargets; districts: number[]; allowOutsideAbsorb: boolean; absorbers?: number[]; includeUnassigned?: boolean; locked?: Uint8Array; lockedDistricts?: number[]; testDelayMs?: number }
+  | { type: 'interaction'; id: number; assignment: Assignment; targets: PopTargets; districts: number[]; allowOutsideAbsorb: boolean; absorbers?: number[]; includeUnassigned?: boolean };
 
 export type WorkerResponse =
   | { type: 'ready'; id: number; elapsedMs: number }

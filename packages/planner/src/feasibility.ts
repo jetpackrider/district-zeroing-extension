@@ -1,5 +1,5 @@
 import type { Assignment, EngineGraph, GroupFeasibility, PopTargets } from '@zd/contracts';
-import { districtAdjacency, districtPopulations } from './districts';
+import { districtAdjacency, districtPopulations, unassignedContact, unassignedPermitted, unassignedSupply } from './districts';
 
 /** 1 when a zeroed district may hold q + 1 people (the state does not divide evenly), else 0. */
 export function extraSlot(targets: PopTargets): 0 | 1 {
@@ -23,8 +23,20 @@ export interface GroupComponent {
   members: number[];
   pop: number;
   excess: number;
-  /** Adjacent districts outside the selection. */
+  /** Adjacent districts outside the selection (never 0; see `touchesUnassigned`). */
   outsideNeighbors: number[];
+  /**
+   * True when a member touches unassigned blocks and the request lets Unassigned take or give
+   * (see UNASSIGNED in @zd/contracts). Unassigned has no target and unlimited room to take
+   * people, so an over component that touches it can always shed its excess there.
+   */
+  touchesUnassigned: boolean;
+  /**
+   * People Unassigned could give this component: everyone in the unassigned areas (connected
+   * unassigned blocks) that a member touches. An under component can make up its shortfall
+   * from Unassigned only if this covers it. 0 unless `touchesUnassigned`.
+   */
+  unassignedPeople: number;
   /** How many members end at q + 1 when the component is zeroed on its own (when excess is 0). */
   extraCount: number;
 }
@@ -35,6 +47,10 @@ export interface GroupAnalysis extends GroupFeasibility {
   adjacency: number[][];
   /** Human-readable summary for the panel's live line. */
   message: string;
+  /** Whether the request lets Unassigned (district 0) take or give at all. */
+  unassignedAllowed: boolean;
+  /** touches[d] = 1 when district d borders unassigned blocks; all 0 unless `unassignedAllowed`. */
+  unassignedContact: Uint8Array;
 }
 
 export interface FeasibilityRequest {
@@ -44,6 +60,8 @@ export interface FeasibilityRequest {
   districts: number[];
   allowOutsideAbsorb?: boolean;
   absorbers?: number[];
+  /** With `allowOutsideAbsorb` and no `absorbers`: Unassigned may take or give too. */
+  includeUnassigned?: boolean;
 }
 
 function normalizeDistricts(districts: number[], numDistricts: number): number[] {
@@ -64,6 +82,10 @@ export function analyzeGroup(
   const members = normalizeDistricts(req.districts, k);
   const inGroup = new Uint8Array(k + 1);
   for (const d of members) inGroup[d] = 1;
+  // Unassigned is looked at only with permission, so a request without it does no extra work.
+  const unassignedAllowed = unassignedPermitted(req);
+  const contact = unassignedAllowed ? unassignedContact(req.graph, req.assignment, k) : new Uint8Array(k + 1);
+  const supply = unassignedAllowed ? unassignedSupply(req.graph, req.assignment, k) : undefined;
 
   // Connected components of the selection in the district adjacency graph.
   const seen = new Uint8Array(k + 1);
@@ -84,26 +106,40 @@ export function analyzeGroup(
     let pop = 0;
     for (const d of comp) pop += pops[d];
     const excess = populationExcess(pop, comp.length, targets);
+    const touchesUnassigned = comp.some((d) => contact[d] === 1);
     components.push({
       members: comp,
       pop,
       excess,
       outsideNeighbors: [...outside].sort((a, b) => a - b),
+      touchesUnassigned,
+      unassignedPeople: touchesUnassigned && supply ? supply.peopleNear(comp) : 0,
       extraCount: excess === 0 ? pop - comp.length * targets.q : 0,
     });
   }
 
   const allowed = req.absorbers && new Set(req.absorbers);
-  const blocked = components.filter((c) => c.excess !== 0 && !(req.allowOutsideAbsorb &&
-    c.outsideNeighbors.some(d => !allowed || allowed.has(d))));
+  /** A real outside district this component may trade with. */
+  const realAbsorber = (c: GroupComponent) => !!req.allowOutsideAbsorb && c.outsideNeighbors.some(d => !allowed || allowed.has(d));
+  /**
+   * Unassigned can settle this component's excess: it takes any number of people from an over
+   * component, but gives an under one at most the people in the unassigned areas it touches.
+   * Excess never counts Unassigned: it is not a member and has no target.
+   */
+  const unassignedCovers = (c: GroupComponent) => c.touchesUnassigned && (c.excess > 0 || c.unassignedPeople >= -c.excess);
+  const blocked = components.filter((c) => c.excess !== 0 && !realAbsorber(c) && !unassignedCovers(c));
+  const extra = { components, pops, adjacency, unassignedAllowed, unassignedContact: contact };
   if (blocked.length === 0) {
     const absorbed = components.filter((c) => c.excess !== 0);
+    const who = absorbed.every((c) => !realAbsorber(c)) ? 'Unassigned will take up the difference'
+      : absorbed.some((c) => unassignedCovers(c)) ? 'outside neighbors and Unassigned will absorb it'
+        : 'outside neighbors will absorb it';
     const message = members.length === 0
       ? 'No districts selected.'
       : absorbed.length === 0
         ? 'This group can be zeroed on its own.'
-        : `This group is ${describe(absorbed.reduce((s, c) => s + c.excess, 0))}; outside neighbors will absorb it.`;
-    return { feasible: members.length > 0, excess: 0, suggestAdd: [], components, pops, adjacency, message };
+        : `This group is ${describe(absorbed.reduce((s, c) => s + c.excess, 0))}; ${who}.`;
+    return { feasible: members.length > 0, excess: 0, suggestAdd: [], message, ...extra };
   }
 
   // Report the worst blocked component (largest |excess|, then lowest district).
@@ -122,8 +158,12 @@ export function analyzeGroup(
   if (suggestAdd.length) parts.push(`Add ${joinOr(suggestAdd.slice(0, 3).map((d) => `District ${d}`))}`);
   if (worst.outsideNeighbors.length && !req.allowOutsideAbsorb) parts.push('let outside neighbors absorb it');
   const scope = components.length > 1 ? `Districts ${worst.members.join(', ')} are` : 'This group is';
-  const message = `${scope} ${describe(worst.excess)}.` + (parts.length ? ` ${capitalize(parts.join(', or '))}.` : '');
-  return { feasible: false, excess: worst.excess, suggestAdd, components, pops, adjacency, message };
+  // An under group next to Unassigned that holds too few people: say why Unassigned is no help.
+  const short = worst.touchesUnassigned && worst.excess < 0
+    ? ` The unassigned blocks next to it hold ${worst.unassignedPeople === 0 ? 'nobody' : `only ${worst.unassignedPeople.toLocaleString('en-US')} ${worst.unassignedPeople === 1 ? 'person' : 'people'}`}.`
+    : '';
+  const message = `${scope} ${describe(worst.excess)}.` + short + (parts.length ? ` ${capitalize(parts.join(', or '))}.` : '');
+  return { feasible: false, excess: worst.excess, suggestAdd, message, ...extra };
 }
 
 /** GroupFeasibility exactly as the contracts define it (the panel's live line). */

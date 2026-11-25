@@ -623,8 +623,11 @@
           delete sm.blockmap[g];
         }
         dropCommitted(pid);
-        if (byD.size === 1) committed[pid] = [...byD.keys()][0];
-        else for (const [d, gs] of byD) committed[`B_${pid}_${encodeBitset(rev[pid], gs)}`] = d;
+        // DRA's OT map deletes a 0 (Unassigned): erased blocks have no feature at all.
+        if (byD.size === 1) {
+          const d = [...byD.keys()][0];
+          if (d) committed[pid] = d;
+        } else for (const [d, gs] of byD) if (d) committed[`B_${pid}_${encodeBitset(rev[pid], gs)}`] = d;
         delete sm.shatterMap[pid];
       }
       blockStamp++;
@@ -632,9 +635,10 @@
       clientSession.fire('state', {});
       rerender();
     }
+    /** The paint tool on a whole precinct; d = 0 is the eraser (DRA deletes the feature). */
     function paintPrecinct(pid, d) {
       dropCommitted(pid);
-      committed[pid] = d;
+      if (d) committed[pid] = d;
       for (const g of rev[pid]) setDist(idx.get(g), d);
       blockStamp++;
       clientSession.fire('state', {});

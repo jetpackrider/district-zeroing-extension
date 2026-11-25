@@ -2,9 +2,13 @@
  * Walkthrough model (SPEC "The walkthrough" / "The walkthrough across several borders").
  * Steps are grouped by border (in realization order), then by precinct (DRA paints one shattered
  * precinct at a time). Each block ticks off as soon as the live plan shows it in its target district.
+ *
+ * Unassigned (district 0) works like any district here. A step with `to` 0 is an erase step (DRA's
+ * eraser, or "Paint this step", which erases through the same actions); its blocks tick off once
+ * the live plan shows them unassigned. A step with `from` 0 paints unassigned blocks into a district.
  */
 
-import type { DeviationChange, Solution, WalkthroughState, WalkthroughStep } from '@zd/contracts';
+import { UNASSIGNED, type DeviationChange, type Solution, type WalkthroughState, type WalkthroughStep } from '@zd/contracts';
 
 export interface StepContext {
   geoids: string[];
@@ -96,6 +100,11 @@ export function buildSteps(solution: Solution, assignment: Uint16Array, ctx: Ste
   return { steps, stepBlocks, duplicates };
 }
 
+/** A step that moves blocks to Unassigned: painted with DRA's eraser. */
+export function isEraseStep(step: Pick<WalkthroughStep, 'to'>): boolean {
+  return step.to === UNASSIGNED;
+}
+
 /** The assignment after applying a plan's targets (CSV mode's expected result). */
 export function applyTargets(base: Uint16Array, target: ReadonlyMap<number, number>): Uint16Array {
   const a = base.slice();
@@ -118,6 +127,7 @@ export function tickWalkthrough(
     const idx = plan.stepBlocks[si];
     let allDone = true;
     const blocks = s.blocks.map((blk, k) => {
+      // For an erase step (to 0): done once DRA shows the block in no district.
       const done = live[idx[k]] === s.to;
       if (!done) allDone = false;
       return done === blk.done ? blk : { ...blk, done };

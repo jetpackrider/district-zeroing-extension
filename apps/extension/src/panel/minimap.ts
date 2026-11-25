@@ -15,7 +15,7 @@ export interface MiniMapOptions {
   attribution?: string;
 }
 
-const COLOR = ['match', ['get', 'role'], 'remove', '#d7263d', 'add', '#1b65d6', 'done', '#2fa84f', 'precinct', '#ff9800', 'border', '#9c27b0', '#ffb300'];
+const COLOR = ['match', ['get', 'role'], 'remove', '#d7263d', 'add', '#1b65d6', 'erase', '#757575', 'done', '#2fa84f', 'precinct', '#ff9800', 'border', '#9c27b0', '#ffb300'];
 
 export function createMiniMap(container: HTMLElement, opts: MiniMapOptions): { sink: HighlightSink; destroy: () => void } {
   if (!workerSet) {
@@ -61,7 +61,7 @@ export function createMiniMap(container: HTMLElement, opts: MiniMapOptions): { s
         const div = document.createElement('div');
         div.className = 'zd-mini-label';
         div.textContent = f.properties.label ?? '';
-        const c = f.properties.role === 'done' ? '#2fa84f' : f.properties.role === 'remove' ? '#d7263d' : '#1b65d6';
+        const c = f.properties.role === 'done' ? '#2fa84f' : f.properties.role === 'remove' ? '#d7263d' : f.properties.role === 'erase' ? '#757575' : '#1b65d6';
         div.style.cssText = `font:bold 11px/1 system-ui,sans-serif;color:#fff;background:${c};border:1.5px solid #fff;border-radius:8px;padding:2px 4px;`;
         return new maplibregl.Marker({ element: div }).setLngLat(f.geometry.coordinates as [number, number]).addTo(map);
       });

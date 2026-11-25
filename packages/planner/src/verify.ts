@@ -4,6 +4,12 @@ import type { Assignment, EngineGraph, PopTargets, Transfer } from '@zd/contract
  * Whole-plan check. Deliberately an independent code path: it imports nothing from the
  * planner (only contract types), applies the transfers itself, recounts populations from
  * scratch, and counts district pieces with union-find rather than the planner's BFS.
+ *
+ * Unassigned (district 0, see UNASSIGNED in @zd/contracts) may be a transfer's endpoint only
+ * when the input permits it: `allowOutsideAbsorb` and either 0 in `absorbers` or, with no
+ * `absorbers`, `includeUnassigned`. It is held to no rule of its own: it need not reach a
+ * target and may be left in any number of pieces. The district on the other side keeps
+ * every rule (its target if selected, no new pieces).
  */
 
 export type PlanIssueKind =
@@ -34,6 +40,8 @@ export interface PlanCheckInput {
   districts: number[];
   allowOutsideAbsorb?: boolean;
   absorbers?: number[];
+  /** With `allowOutsideAbsorb` and no `absorbers`: Unassigned may take or give too. */
+  includeUnassigned?: boolean;
   transfers: Transfer[];
   locked?: Uint8Array;
 }
@@ -80,12 +88,15 @@ export function verifyPlan(input: PlanCheckInput): PlanCheckResult {
   const selected = new Uint8Array(k + 1);
   for (const d of input.districts) if (d >= 1 && d <= k) selected[d] = 1;
   const absorbers = input.absorbers && new Set(input.absorbers);
-  const mayTouch = (d: number) => !!selected[d] ||
+  // Unassigned only with explicit permission; "any outside district" never includes it.
+  const unassignedOk = !!input.allowOutsideAbsorb && (absorbers ? absorbers.has(0) : input.includeUnassigned === true);
+  const mayTouch = (d: number) => d === 0 ? unassignedOk : !!selected[d] ||
     (!!input.allowOutsideAbsorb && (!absorbers || absorbers.has(d)));
   const touchedBlock = new Uint8Array(graph.n);
 
   input.transfers.forEach((t, ti) => {
-    const okDistrict = (d: number) => Number.isInteger(d) && d >= 1 && d <= k;
+    // 0 is a valid index (Unassigned); whether it may be touched is checked just below.
+    const okDistrict = (d: number) => Number.isInteger(d) && d >= 0 && d <= k;
     if (!okDistrict(t.from) || !okDistrict(t.to) || t.from === t.to) {
       issues.push({ kind: 'bad-transfer', transfer: ti, detail: `transfer ${ti} has bad districts ${t.from} -> ${t.to}` });
       return;
@@ -126,7 +137,7 @@ export function verifyPlan(input: PlanCheckInput): PlanCheckResult {
   for (let b = 0; b < graph.n; b++) {
     if (final[b] === original[b]) continue;
     for (const d of [original[b], final[b]]) {
-      if (d === 0 || !mayTouch(d)) {
+      if (!mayTouch(d)) {
         issues.push({ kind: 'outside-touched', district: d, block: b, detail: `block ${b} changed District ${d}, which must stay untouched` });
       }
     }
@@ -141,6 +152,7 @@ export function verifyPlan(input: PlanCheckInput): PlanCheckResult {
     if (!zero) issues.push({ kind: 'not-zeroed', district: d, detail: `District ${d} ends at ${p}, not ${targets.q}${targets.remainder > 0 ? ` or ${targets.q + 1}` : ''}` });
   }
 
+  // Pieces of districts 1..k only: Unassigned is never required to be contiguous.
   const before = pieces(graph, original, k);
   const after = pieces(graph, final, k);
   for (let d = 1; d <= k; d++) {
